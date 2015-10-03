@@ -171,7 +171,7 @@ static bool MainLoop(bool retryCreate)
     }
 
     // Create the room model
-    roomScene = new Scene(false);
+    roomScene = new Scene();
 
     // Initialize camera
     mainCamObj = Camera(&XMVectorSet(0.0f, 1.6f, 5.0f, 0), &XMQuaternionIdentity());
@@ -277,7 +277,6 @@ Done:
         delete pEyeRenderTexture[eye];
         delete pEyeDepthBuffer[eye];
     }
-    DIRECTX.ReleaseDevice();
     ovr_Destroy(HMD);
 
     // Retry on ovrError_DisplayLost

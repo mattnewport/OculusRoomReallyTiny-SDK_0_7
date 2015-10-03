@@ -23,6 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <numeric>
@@ -102,7 +103,7 @@ struct DataBuffer {
 struct DirectX11 {
     HWND Window = nullptr;
     bool Running = false;
-    bool Key[256];
+    bool Key[256] = {};
     int WinSizeW = 0;
     int WinSizeH = 0;
     ID3D11DevicePtr Device;
@@ -139,13 +140,7 @@ struct DirectX11 {
         return 0;
     }
 
-    DirectX11() {
-        // Clear input
-        std::fill(std::begin(Key), std::end(Key), false);
-    }
-
     ~DirectX11() {
-        ReleaseDevice();
         CloseWindow();
     }
 
@@ -237,15 +232,14 @@ struct DirectX11 {
 
         // Main depth buffer
         MainDepthBuffer = std::make_unique<DepthBuffer>(Device, WinSizeW, WinSizeH);
-        ID3D11RenderTargetView* rts[] = {BackBufferRT};
-        Context->OMSetRenderTargets(std::distance(std::begin(rts), std::end(rts)), rts,
-                                    MainDepthBuffer->TexDsv);
+        auto rts = {BackBufferRT.GetInterfacePtr()};
+        Context->OMSetRenderTargets(rts.size(), begin(rts), MainDepthBuffer->TexDsv);
 
         // Buffer for shader constants
         UniformBufferGen = std::make_unique<DataBuffer>(Device, D3D11_BIND_CONSTANT_BUFFER, nullptr,
                                                         UNIFORM_DATA_SIZE);
-        ID3D11Buffer* buffs[] = {UniformBufferGen->D3DBuffer};
-        Context->VSSetConstantBuffers(0, std::distance(std::begin(buffs), std::end(buffs)), buffs);
+        auto buffs = {UniformBufferGen->D3DBuffer.GetInterfacePtr()};
+        Context->VSSetConstantBuffers(0, buffs.size(), begin(buffs));
 
         // Set max frame latency to 1
         IDXGIDevice1Ptr DXGIDevice1;
@@ -288,12 +282,6 @@ struct DirectX11 {
             Sleep(10);
         }
     }
-
-    void ReleaseDevice() {
-        if (SwapChain) {
-            SwapChain->SetFullscreenState(FALSE, NULL);
-        }
-    }
 };
 
 // global DX11 state
@@ -332,8 +320,8 @@ struct Texture
             DIRECTX.Context->UpdateSubresource(Tex, level, nullptr, pix, sizeW * 4, sizeH * 4);
 
             for (int j = 0; j < (sizeH & ~1); j += 2) {
-                uint8_t* psrc = reinterpret_cast<uint8_t*>(pix) + (sizeW * j * 4);
-                uint8_t* pdest = reinterpret_cast<uint8_t*>(pix) + (sizeW * j);
+                auto psrc = reinterpret_cast<std::uint8_t*>(pix) + (sizeW * j * 4);
+                auto pdest = reinterpret_cast<std::uint8_t*>(pix) + (sizeW * j);
                 for (int i = 0; i<sizeW>> 1; i++, psrc += 8, pdest += 4) {
                     pdest[0] =
                         (((int)psrc[0]) + psrc[4] + psrc[sizeW * 4 + 0] + psrc[sizeW * 4 + 4]) >> 2;
@@ -406,15 +394,12 @@ struct Material {
     ID3D11PixelShaderPtr D3DPix;
     std::unique_ptr<Texture> Tex;
     ID3D11InputLayoutPtr InputLayout;
-    UINT VertexSize;
     ID3D11SamplerStatePtr SamplerState;
     ID3D11RasterizerStatePtr Rasterizer;
     ID3D11DepthStencilStatePtr DepthState;
     ID3D11BlendStatePtr BlendState;
 
-    enum { MAT_WRAP = 1, MAT_WIRE = 2, MAT_ZALWAYS = 4, MAT_NOCULL = 8, MAT_TRANS = 16 };
-
-    Material(Texture* t) : Tex(t), VertexSize(24) {
+    Material(Texture* t) : Tex(t) {
         D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
             {"Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
@@ -491,352 +476,215 @@ struct Vertex {
     Vertex(XMFLOAT3 pos, DWORD c, float u, float v) : Pos(pos), C(c), U(u), V(v){};
 };
 
-struct TriangleSet
-{
-    int numVertices = 0;
-    int numIndices = 0;
-    int maxBuffer = 0;
+struct TriangleSet {
     std::vector<Vertex> Vertices;
     std::vector<short> Indices;
-    TriangleSet(int maxTriangles = 2000)
-        : maxBuffer(3 * maxTriangles), Vertices(maxBuffer), Indices(maxBuffer) {}
 
     void AddQuad(Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
-        AddTriangle(v0, v1, v2);
-        AddTriangle(v3, v2, v1);
+        auto AddTriangle = [this](const std::initializer_list<Vertex>& vs) {
+            for (const auto& v : vs) {
+                Indices.push_back(static_cast<short>(Vertices.size()));
+                Vertices.push_back(v);
+            }
+        };
+
+        AddTriangle({v0, v1, v2});
+        AddTriangle({v3, v2, v1});
     }
 
-    void AddTriangle(Vertex v0, Vertex v1, Vertex v2) {
-        VALIDATE(numVertices <= (Vertices.size() - 3), "Insufficient triangle set");
-        std::iota(begin(Indices) + numIndices, begin(Indices) + numIndices + 3, numVertices);
-        numIndices += 3;
-        for (const auto& v : {v0, v1, v2}) Vertices[numVertices++] = v;
-    }
+    void AddSolidColorBox(float x1, float y1, float z1, float x2, float y2, float z2, DWORD c) {
+        const auto ModifyColor = [](DWORD c, XMFLOAT3 pos) {
+            const auto v = XMLoadFloat3(&pos);
+            auto length = [](const auto& v) { return XMVectorGetX(XMVector3Length(v)); };
+            const auto dist1 = length(XMVectorAdd(v, XMVectorSet(2.0f, -4.0f, 2.0f, 0.0f)));
+            const auto dist2 = length(XMVectorAdd(v, XMVectorSet(-3.0f, -4.0f, 3.0f, 0.0f)));
+            const auto dist3 = length(XMVectorAdd(v, XMVectorSet(4.0f, -3.0f, -25.0f, 0.0f)));
+            int bri = rand() % 160;
+            float R = ((c >> 16) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            float G = ((c >> 8) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            float B = ((c >> 0) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            return ((c & 0xff000000) + ((R > 255 ? 255 : (DWORD)R) << 16) +
+                    ((G > 255 ? 255 : (DWORD)G) << 8) + (B > 255 ? 255 : (DWORD)B));
+        };
 
-    DWORD ModifyColor(DWORD c, XMFLOAT3 pos)
-	{
-		#define GetLengthLocal(v)  (sqrt(v.x*v.x + v.y*v.y + v.z*v.z))
-		float dist1 = GetLengthLocal(XMFLOAT3(pos.x - (-2), pos.y - (4), pos.z - (-2)));
-		float dist2 = GetLengthLocal(XMFLOAT3(pos.x - (3),  pos.y - (4), pos.z - (-3)));
-		float dist3 = GetLengthLocal(XMFLOAT3(pos.x - (-4), pos.y - (3), pos.z - (25)));
-		int   bri = rand() % 160;
-		float R = ((c >> 16) & 0xff) * (bri + 192.0f*(0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-		float G = ((c >> 8) & 0xff) * (bri + 192.0f*(0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-		float B = ((c >> 0) & 0xff) * (bri + 192.0f*(0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-		return( (c & 0xff000000) + ((R>255 ? 255 : (DWORD)R) << 16) + ((G>255 ? 255 : (DWORD)G) << 8) + (B>255 ? 255 : (DWORD)B));
-	}
-
-	void AddSolidColorBox(float x1, float y1, float z1, float x2, float y2, float z2, DWORD c)
-	{
-		AddQuad(Vertex(XMFLOAT3(x1, y2, z1), ModifyColor(c, XMFLOAT3(x1, y2, z1)), z1, x1),
-			    Vertex(XMFLOAT3(x2, y2, z1), ModifyColor(c, XMFLOAT3(x2, y2, z1)), z1, x2),
-			    Vertex(XMFLOAT3(x1, y2, z2), ModifyColor(c, XMFLOAT3(x1, y2, z2)), z2, x1),
-			    Vertex(XMFLOAT3(x2, y2, z2), ModifyColor(c, XMFLOAT3(x2, y2, z2)), z2, x2));
-		AddQuad(Vertex(XMFLOAT3(x2, y1, z1), ModifyColor(c, XMFLOAT3(x2, y1, z1)), z1, x2),
-			    Vertex(XMFLOAT3(x1, y1, z1), ModifyColor(c, XMFLOAT3(x1, y1, z1)), z1, x1),
-			    Vertex(XMFLOAT3(x2, y1, z2), ModifyColor(c, XMFLOAT3(x2, y1, z2)), z2, x2),
-			    Vertex(XMFLOAT3(x1, y1, z2), ModifyColor(c, XMFLOAT3(x1, y1, z2)), z2, x1));
-		AddQuad(Vertex(XMFLOAT3(x1, y1, z2), ModifyColor(c, XMFLOAT3(x1, y1, z2)), z2, y1),
-			    Vertex(XMFLOAT3(x1, y1, z1), ModifyColor(c, XMFLOAT3(x1, y1, z1)), z1, y1),
-			    Vertex(XMFLOAT3(x1, y2, z2), ModifyColor(c, XMFLOAT3(x1, y2, z2)), z2, y2),
-			    Vertex(XMFLOAT3(x1, y2, z1), ModifyColor(c, XMFLOAT3(x1, y2, z1)), z1, y2));
-		AddQuad(Vertex(XMFLOAT3(x2, y1, z1), ModifyColor(c, XMFLOAT3(x2, y1, z1)), z1, y1),
-			    Vertex(XMFLOAT3(x2, y1, z2), ModifyColor(c, XMFLOAT3(x2, y1, z2)), z2, y1),
-			    Vertex(XMFLOAT3(x2, y2, z1), ModifyColor(c, XMFLOAT3(x2, y2, z1)), z1, y2),
-			    Vertex(XMFLOAT3(x2, y2, z2), ModifyColor(c, XMFLOAT3(x2, y2, z2)), z2, y2));
-		AddQuad(Vertex(XMFLOAT3(x1, y1, z1), ModifyColor(c, XMFLOAT3(x1, y1, z1)), x1, y1),
-			    Vertex(XMFLOAT3(x2, y1, z1), ModifyColor(c, XMFLOAT3(x2, y1, z1)), x2, y1),
-			    Vertex(XMFLOAT3(x1, y2, z1), ModifyColor(c, XMFLOAT3(x1, y2, z1)), x1, y2),
-			    Vertex(XMFLOAT3(x2, y2, z1), ModifyColor(c, XMFLOAT3(x2, y2, z1)), x2, y2));
-		AddQuad(Vertex(XMFLOAT3(x2, y1, z2), ModifyColor(c, XMFLOAT3(x2, y1, z2)), x2, y1),
-			    Vertex(XMFLOAT3(x1, y1, z2), ModifyColor(c, XMFLOAT3(x1, y1, z2)), x1, y1),
-			    Vertex(XMFLOAT3(x2, y2, z2), ModifyColor(c, XMFLOAT3(x2, y2, z2)), x2, y2),
-			    Vertex(XMFLOAT3(x1, y2, z2), ModifyColor(c, XMFLOAT3(x1, y2, z2)), x1, y2));
-	}
-};
-
-//----------------------------------------------------------------------
-struct Model
-{
-	XMFLOAT3     Pos; 
-	XMFLOAT4     Rot; 
-	Material   * Fill;
-	DataBuffer * VertexBuffer;
-	DataBuffer * IndexBuffer;
-	int          NumIndices;
-
-	Model() : Fill(nullptr), VertexBuffer(nullptr), IndexBuffer(nullptr) {};
-    void Init(TriangleSet * t)
-    {
-		NumIndices = t->numIndices;
-		VertexBuffer = new DataBuffer(DIRECTX.Device, D3D11_BIND_VERTEX_BUFFER, &t->Vertices[0], t->numVertices * sizeof(Vertex));
-		IndexBuffer = new DataBuffer(DIRECTX.Device, D3D11_BIND_INDEX_BUFFER, &t->Indices[0], t->numIndices * sizeof(short));
-    }
-	Model(TriangleSet * t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material * argFill) :
-        Pos(argPos),
-        Rot(argRot),
-        Fill(argFill)
-	{
-        Init(t);
-	}
-    // 2D scenes, for latency tester and full screen copies, etc
-	Model(Material * mat, float minx, float miny, float maxx, float maxy,  float zDepth = 0) :
-        Pos(XMFLOAT3(0, 0, 0)),
-        Rot(XMFLOAT4(0, 0, 0, 1)),
-        Fill(mat)
-	{
-		TriangleSet quad;
-		quad.AddQuad(Vertex(XMFLOAT3(minx, miny, zDepth), 0xffffffff, 0, 1),
-			Vertex(XMFLOAT3(minx, maxy, zDepth), 0xffffffff, 0, 0),
-			Vertex(XMFLOAT3(maxx, miny, zDepth), 0xffffffff, 1, 1),
-			Vertex(XMFLOAT3(maxx, maxy, zDepth), 0xffffffff, 1, 0));
-        Init(&quad);
-	}
-    ~Model()
-    {
-        delete Fill; Fill = nullptr;
-        delete VertexBuffer; VertexBuffer = nullptr;
-        delete IndexBuffer; IndexBuffer = nullptr;
-    }
-
-	void Render(XMMATRIX * projView, float R, float G, float B, float A, bool standardUniforms)
-	{
-		XMMATRIX modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)), XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
-		XMMATRIX mat = XMMatrixMultiply(modelMat, *projView);
-		float col[] = { R, G, B, A };
-		if (standardUniforms) memcpy(DIRECTX.UniformData + 0, &mat, 64); // ProjView
-		if (standardUniforms) memcpy(DIRECTX.UniformData + 64, &col, 16); // MasterCol
-		D3D11_MAPPED_SUBRESOURCE map;
-		DIRECTX.Context->Map(DIRECTX.UniformBufferGen->D3DBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-		memcpy(map.pData, &DIRECTX.UniformData, DIRECTX.UNIFORM_DATA_SIZE);
-		DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen->D3DBuffer, 0);
-		DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
-		DIRECTX.Context->IASetIndexBuffer(IndexBuffer->D3DBuffer, DXGI_FORMAT_R16_UINT, 0);
-		UINT offset = 0;
-        ID3D11Buffer* vbs[] = { VertexBuffer->D3DBuffer };
-		DIRECTX.Context->IASetVertexBuffers(0, std::distance(std::begin(vbs), std::end(vbs)), vbs, &Fill->VertexSize, &offset);
-		DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		DIRECTX.Context->VSSetShader(Fill->D3DVert, NULL, 0);
-		DIRECTX.Context->PSSetShader(Fill->D3DPix, NULL, 0);
-        ID3D11SamplerState* samplerStates[] = { Fill->SamplerState };
-		DIRECTX.Context->PSSetSamplers(0, std::distance(std::begin(samplerStates), std::end(samplerStates)), samplerStates);
-		DIRECTX.Context->RSSetState(Fill->Rasterizer);
-		DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
-		DIRECTX.Context->OMSetBlendState(Fill->BlendState, NULL, 0xffffffff);
-        ID3D11ShaderResourceView* texSrvs[] = { Fill->Tex->TexSv };
-		DIRECTX.Context->PSSetShaderResources(0, std::distance(std::begin(texSrvs), std::end(texSrvs)), texSrvs);
-		DIRECTX.Context->DrawIndexed((UINT)NumIndices, 0, 0);
-	}
-};
-
-//------------------------------------------------------------------------- 
-struct Scene
-{
-    static const int MAX_MODELS = 100;
-	Model *Models[MAX_MODELS];
-    int numModels;
-
-	void Add(Model * n)
-    {
-        if (numModels < MAX_MODELS)
-            Models[numModels++] = n;
-    }
-
-	void Render(XMMATRIX * projView, float R, float G, float B, float A, bool standardUniforms)
-	{
-		for (int i = 0; i < numModels; ++i)
-            Models[i]->Render(projView, R, G, B, A, standardUniforms);
-	}
-    
-    void Init(bool includeIntensiveGPUobject)
-	{
-		TriangleSet cube;
-		cube.AddSolidColorBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
-		Add(
-            new Model(&cube, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_CEILING)
-                )
-            )
-        );
-
-		TriangleSet spareCube;
-		spareCube.AddSolidColorBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
-		Add(
-            new Model(&spareCube, XMFLOAT3(0, -10, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_CEILING)
-                )
-            )
-        );
-
-		TriangleSet walls;
-		walls.AddSolidColorBox(10.1f, 0.0f, 20.0f, 10.0f, 4.0f, -20.0f, 0xff808080);  // Left Wall
-		walls.AddSolidColorBox(10.0f, -0.1f, 20.1f, -10.0f, 4.0f, 20.0f, 0xff808080); // Back Wall
-		walls.AddSolidColorBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f, 0xff808080);   // Right Wall
-		Add(
-            new Model(&walls, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_WALL)
-                )
-            )
-        );
-
-		if (includeIntensiveGPUobject)
-		{
-			TriangleSet partitions;
-			for (float depth = 0.0f; depth > -3.0f; depth -= 0.1f)
-				partitions.AddSolidColorBox(9.0f, 0.5f, -depth, -9.0f, 3.5f, -depth, 0x10ff80ff); // Partition
-			Add(
-                new Model(&partitions, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                    new Material(
-                        new Texture(false, 256, 256, Texture::AUTO_FLOOR)
-                    )
-                )
-            ); // Floors
-		}
-
-		TriangleSet floors;
-		floors.AddSolidColorBox(10.0f, -0.1f, 20.0f, -10.0f, 0.0f, -20.1f, 0xff808080); // Main floor
-		floors.AddSolidColorBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f, 0xff808080); // Bottom floor
-		Add(
-            new Model(&floors, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_FLOOR)
-                )
-            )
-        ); // Floors
-
-		TriangleSet ceiling;
-		ceiling.AddSolidColorBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
-		Add(
-            new Model(&ceiling, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_CEILING)
-                )
-            )
-        ); // Ceiling
-
-		TriangleSet furniture;
-		furniture.AddSolidColorBox(-9.5f, 0.75f, -3.0f, -10.1f, 2.5f, -3.1f, 0xff383838);    // Right side shelf// Verticals
-		furniture.AddSolidColorBox(-9.5f, 0.95f, -3.7f, -10.1f, 2.75f, -3.8f, 0xff383838);   // Right side shelf
-		furniture.AddSolidColorBox(-9.55f, 1.20f, -2.5f, -10.1f, 1.30f, -3.75f, 0xff383838); // Right side shelf// Horizontals
-		furniture.AddSolidColorBox(-9.55f, 2.00f, -3.05f, -10.1f, 2.10f, -4.2f, 0xff383838); // Right side shelf
-		furniture.AddSolidColorBox(-5.0f, 1.1f, -20.0f, -10.0f, 1.2f, -20.1f, 0xff383838);   // Right railing   
-		furniture.AddSolidColorBox(10.0f, 1.1f, -20.0f, 5.0f, 1.2f, -20.1f, 0xff383838);   // Left railing  
-		for (float f = 5; f <= 9; f += 1)
-            furniture.AddSolidColorBox(-f, 0.0f, -20.0f, -f - 0.1f, 1.1f, -20.1f, 0xff505050); // Left Bars
-		for (float f = 5; f <= 9; f += 1)
-            furniture.AddSolidColorBox(f, 1.1f, -20.0f, f + 0.1f, 0.0f, -20.1f, 0xff505050); // Right Bars
-		furniture.AddSolidColorBox(1.8f, 0.8f, -1.0f, 0.0f, 0.7f, 0.0f, 0xff505000);  // Table
-		furniture.AddSolidColorBox(1.8f, 0.0f, 0.0f, 1.7f, 0.7f, -0.1f, 0xff505000); // Table Leg 
-		furniture.AddSolidColorBox(1.8f, 0.7f, -1.0f, 1.7f, 0.0f, -0.9f, 0xff505000); // Table Leg 
-		furniture.AddSolidColorBox(0.0f, 0.0f, -1.0f, 0.1f, 0.7f, -0.9f, 0xff505000);  // Table Leg 
-		furniture.AddSolidColorBox(0.0f, 0.7f, 0.0f, 0.1f, 0.0f, -0.1f, 0xff505000);  // Table Leg 
-		furniture.AddSolidColorBox(1.4f, 0.5f, 1.1f, 0.8f, 0.55f, 0.5f, 0xff202050);  // Chair Set
-		furniture.AddSolidColorBox(1.401f, 0.0f, 1.101f, 1.339f, 1.0f, 1.039f, 0xff202050); // Chair Leg 1
-		furniture.AddSolidColorBox(1.401f, 0.5f, 0.499f, 1.339f, 0.0f, 0.561f, 0xff202050); // Chair Leg 2
-		furniture.AddSolidColorBox(0.799f, 0.0f, 0.499f, 0.861f, 0.5f, 0.561f, 0xff202050); // Chair Leg 2
-		furniture.AddSolidColorBox(0.799f, 1.0f, 1.101f, 0.861f, 0.0f, 1.039f, 0xff202050); // Chair Leg 2
-		furniture.AddSolidColorBox(1.4f, 0.97f, 1.05f, 0.8f, 0.92f, 1.10f, 0xff202050); // Chair Back high bar
-		for (float f = 3.0f; f <= 6.6f; f += 0.4f)
-            furniture.AddSolidColorBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040); // Posts
-		Add(
-            new Model(&furniture, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
-                new Material(
-                    new Texture(false, 256, 256, Texture::AUTO_WHITE)
-                )
-            )
-        ); // Fixtures & furniture
-	}
-
-	Scene() : numModels(0) {}
-	Scene(bool includeIntensiveGPUobject) :
-        numModels(0)
-    {
-        Init(includeIntensiveGPUobject);
-    }
-    void Release()
-    {
-        while (numModels-- > 0)
-            delete Models[numModels];
-    }
-    ~Scene()
-    {
-        Release();
+        AddQuad({{x1, y2, z1}, ModifyColor(c, {x1, y2, z1}), z1, x1},
+                {{x2, y2, z1}, ModifyColor(c, {x2, y2, z1}), z1, x2},
+                {{x1, y2, z2}, ModifyColor(c, {x1, y2, z2}), z2, x1},
+                {{x2, y2, z2}, ModifyColor(c, {x2, y2, z2}), z2, x2});
+        AddQuad({{x2, y1, z1}, ModifyColor(c, {x2, y1, z1}), z1, x2},
+                {{x1, y1, z1}, ModifyColor(c, {x1, y1, z1}), z1, x1},
+                {{x2, y1, z2}, ModifyColor(c, {x2, y1, z2}), z2, x2},
+                {{x1, y1, z2}, ModifyColor(c, {x1, y1, z2}), z2, x1});
+        AddQuad({{x1, y1, z2}, ModifyColor(c, {x1, y1, z2}), z2, y1},
+                {{x1, y1, z1}, ModifyColor(c, {x1, y1, z1}), z1, y1},
+                {{x1, y2, z2}, ModifyColor(c, {x1, y2, z2}), z2, y2},
+                {{x1, y2, z1}, ModifyColor(c, {x1, y2, z1}), z1, y2});
+        AddQuad({{x2, y1, z1}, ModifyColor(c, {x2, y1, z1}), z1, y1},
+                {{x2, y1, z2}, ModifyColor(c, {x2, y1, z2}), z2, y1},
+                {{x2, y2, z1}, ModifyColor(c, {x2, y2, z1}), z1, y2},
+                {{x2, y2, z2}, ModifyColor(c, {x2, y2, z2}), z2, y2});
+        AddQuad({{x1, y1, z1}, ModifyColor(c, {x1, y1, z1}), x1, y1},
+                {{x2, y1, z1}, ModifyColor(c, {x2, y1, z1}), x2, y1},
+                {{x1, y2, z1}, ModifyColor(c, {x1, y2, z1}), x1, y2},
+                {{x2, y2, z1}, ModifyColor(c, {x2, y2, z1}), x2, y2});
+        AddQuad({{x2, y1, z2}, ModifyColor(c, {x2, y1, z2}), x2, y1},
+                {{x1, y1, z2}, ModifyColor(c, {x1, y1, z2}), x1, y1},
+                {{x2, y2, z2}, ModifyColor(c, {x2, y2, z2}), x2, y2},
+                {{x1, y2, z2}, ModifyColor(c, {x1, y2, z2}), x1, y2});
     }
 };
 
-//-----------------------------------------------------------
-struct Camera
-{
-	XMVECTOR Pos;
-	XMVECTOR Rot;
-	Camera() {};
-	Camera(XMVECTOR * pos, XMVECTOR * rot) : Pos(*pos), Rot(*rot)	{};
-	XMMATRIX GetViewMatrix()
-	{
-		XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), Rot);
-		return(XMMatrixLookAtRH(Pos, XMVectorAdd(Pos, forward), XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Rot)));
-	}
+struct Model {
+    XMFLOAT3 Pos;
+    XMFLOAT4 Rot;
+    std::unique_ptr<Material> Fill;
+    std::unique_ptr<DataBuffer> VertexBuffer;
+    std::unique_ptr<DataBuffer> IndexBuffer;
+    int NumIndices;
+
+    Model(TriangleSet* t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material* argFill)
+        : Pos(argPos), Rot(argRot), Fill(argFill), NumIndices{static_cast<short>(t->Indices.size())} {
+        VertexBuffer =
+            std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_VERTEX_BUFFER, t->Vertices.data(),
+                                         t->Vertices.size() * sizeof(Vertex));
+        IndexBuffer = std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_INDEX_BUFFER,
+                                                   t->Indices.data(), NumIndices * sizeof(short));
+    }
+
+    void Render(XMMATRIX* projView, float R, float G, float B, float A, bool standardUniforms) {
+        XMMATRIX modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
+                                             XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
+        XMMATRIX mat = XMMatrixMultiply(modelMat, *projView);
+        float col[] = {R, G, B, A};
+        if (standardUniforms) memcpy(DIRECTX.UniformData + 0, &mat, 64);   // ProjView
+        if (standardUniforms) memcpy(DIRECTX.UniformData + 64, &col, 16);  // MasterCol
+        
+        D3D11_MAPPED_SUBRESOURCE map{};
+        DIRECTX.Context->Map(DIRECTX.UniformBufferGen->D3DBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0,
+                             &map);
+        memcpy(map.pData, &DIRECTX.UniformData, DIRECTX.UNIFORM_DATA_SIZE);
+        DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen->D3DBuffer, 0);
+        DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
+        DIRECTX.Context->IASetIndexBuffer(IndexBuffer->D3DBuffer, DXGI_FORMAT_R16_UINT, 0);
+        const UINT offset = 0;
+        auto vbs = {VertexBuffer->D3DBuffer.GetInterfacePtr()};
+        auto strides = {sizeof(Vertex)};
+        DIRECTX.Context->IASetVertexBuffers(0, vbs.size(), begin(vbs), begin(strides), &offset);
+        DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        DIRECTX.Context->VSSetShader(Fill->D3DVert, nullptr, 0);
+        DIRECTX.Context->PSSetShader(Fill->D3DPix, nullptr, 0);
+
+        auto samplerStates = {Fill->SamplerState.GetInterfacePtr()};
+        DIRECTX.Context->PSSetSamplers(0, samplerStates.size(), begin(samplerStates));
+        DIRECTX.Context->RSSetState(Fill->Rasterizer);
+        DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
+        DIRECTX.Context->OMSetBlendState(Fill->BlendState, NULL, 0xffffffff);
+
+        auto texSrvs = {Fill->Tex->TexSv.GetInterfacePtr()};
+        DIRECTX.Context->PSSetShaderResources(0, texSrvs.size(), begin(texSrvs));
+        DIRECTX.Context->DrawIndexed(NumIndices, 0, 0);
+    }
 };
 
-//----------------------------------------------------
-struct Utility
-{
-	void Output(const char * fnt, ...)
-	{
-		static char string_text[1000];
-		va_list args; va_start(args, fnt);
-		vsprintf_s(string_text, fnt, args);
-		va_end(args);
-		OutputDebugStringA(string_text);
-	}
-} static Util;
+struct Scene {
+    std::vector<std::unique_ptr<Model>> Models;
+
+    void Add(Model* n) { Models.emplace_back(n); }
+
+    void Render(XMMATRIX* projView, float R, float G, float B, float A, bool standardUniforms) {
+        for (const auto& model : Models) model->Render(projView, R, G, B, A, standardUniforms);
+    }
+
+    Scene() {
+        TriangleSet cube;
+        cube.AddSolidColorBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
+        Add(new Model(&cube, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+                      new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
+
+        TriangleSet spareCube;
+        spareCube.AddSolidColorBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
+        Add(new Model(&spareCube, XMFLOAT3(0, -10, 0), XMFLOAT4(0, 0, 0, 1),
+                      new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
+
+        TriangleSet walls;
+        walls.AddSolidColorBox(10.1f, 0.0f, 20.0f, 10.0f, 4.0f, -20.0f, 0xff808080);   // Left Wall
+        walls.AddSolidColorBox(10.0f, -0.1f, 20.1f, -10.0f, 4.0f, 20.0f, 0xff808080);  // Back Wall
+        walls.AddSolidColorBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f,
+                               0xff808080);  // Right Wall
+        Add(new Model(&walls, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+                      new Material(new Texture(false, 256, 256, Texture::AUTO_WALL))));
+
+        TriangleSet floors;
+        floors.AddSolidColorBox(10.0f, -0.1f, 20.0f, -10.0f, 0.0f, -20.1f,
+                                0xff808080);  // Main floor
+        floors.AddSolidColorBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f,
+                                0xff808080);  // Bottom floor
+        Add(new Model(&floors, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+                      new Material(new Texture(false, 256, 256, Texture::AUTO_FLOOR))));  // Floors
+
+        TriangleSet ceiling;
+        ceiling.AddSolidColorBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
+        Add(new Model(
+            &ceiling, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+            new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));  // Ceiling
+
+        TriangleSet furniture;
+        furniture.AddSolidColorBox(-9.5f, 0.75f, -3.0f, -10.1f, 2.5f, -3.1f,
+                                   0xff383838);  // Right side shelf// Verticals
+        furniture.AddSolidColorBox(-9.5f, 0.95f, -3.7f, -10.1f, 2.75f, -3.8f,
+                                   0xff383838);  // Right side shelf
+        furniture.AddSolidColorBox(-9.55f, 1.20f, -2.5f, -10.1f, 1.30f, -3.75f,
+                                   0xff383838);  // Right side shelf// Horizontals
+        furniture.AddSolidColorBox(-9.55f, 2.00f, -3.05f, -10.1f, 2.10f, -4.2f,
+                                   0xff383838);  // Right side shelf
+        furniture.AddSolidColorBox(-5.0f, 1.1f, -20.0f, -10.0f, 1.2f, -20.1f,
+                                   0xff383838);  // Right railing
+        furniture.AddSolidColorBox(10.0f, 1.1f, -20.0f, 5.0f, 1.2f, -20.1f,
+                                   0xff383838);  // Left railing
+        for (float f = 5; f <= 9; f += 1)
+            furniture.AddSolidColorBox(-f, 0.0f, -20.0f, -f - 0.1f, 1.1f, -20.1f,
+                                       0xff505050);  // Left Bars
+        for (float f = 5; f <= 9; f += 1)
+            furniture.AddSolidColorBox(f, 1.1f, -20.0f, f + 0.1f, 0.0f, -20.1f,
+                                       0xff505050);                                    // Right Bars
+        furniture.AddSolidColorBox(1.8f, 0.8f, -1.0f, 0.0f, 0.7f, 0.0f, 0xff505000);   // Table
+        furniture.AddSolidColorBox(1.8f, 0.0f, 0.0f, 1.7f, 0.7f, -0.1f, 0xff505000);   // Table Leg
+        furniture.AddSolidColorBox(1.8f, 0.7f, -1.0f, 1.7f, 0.0f, -0.9f, 0xff505000);  // Table Leg
+        furniture.AddSolidColorBox(0.0f, 0.0f, -1.0f, 0.1f, 0.7f, -0.9f, 0xff505000);  // Table Leg
+        furniture.AddSolidColorBox(0.0f, 0.7f, 0.0f, 0.1f, 0.0f, -0.1f, 0xff505000);   // Table Leg
+        furniture.AddSolidColorBox(1.4f, 0.5f, 1.1f, 0.8f, 0.55f, 0.5f, 0xff202050);   // Chair Set
+        furniture.AddSolidColorBox(1.401f, 0.0f, 1.101f, 1.339f, 1.0f, 1.039f,
+                                   0xff202050);  // Chair Leg 1
+        furniture.AddSolidColorBox(1.401f, 0.5f, 0.499f, 1.339f, 0.0f, 0.561f,
+                                   0xff202050);  // Chair Leg 2
+        furniture.AddSolidColorBox(0.799f, 0.0f, 0.499f, 0.861f, 0.5f, 0.561f,
+                                   0xff202050);  // Chair Leg 2
+        furniture.AddSolidColorBox(0.799f, 1.0f, 1.101f, 0.861f, 0.0f, 1.039f,
+                                   0xff202050);  // Chair Leg 2
+        furniture.AddSolidColorBox(1.4f, 0.97f, 1.05f, 0.8f, 0.92f, 1.10f,
+                                   0xff202050);  // Chair Back high bar
+        for (float f = 3.0f; f <= 6.6f; f += 0.4f)
+            furniture.AddSolidColorBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040);  // Posts
+        Add(new Model(&furniture, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+                      new Material(new Texture(false, 256, 256,
+                                               Texture::AUTO_WHITE))));  // Fixtures & furniture
+    }
+};
+
+struct Camera {
+    XMVECTOR Pos;
+    XMVECTOR Rot;
+    Camera() = default;
+    Camera(XMVECTOR* pos, XMVECTOR* rot) : Pos(*pos), Rot(*rot){};
+    XMMATRIX GetViewMatrix() {
+        XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), Rot);
+        return XMMatrixLookAtRH(Pos, XMVectorAdd(Pos, forward),
+                                XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Rot));
+    }
+};
 
 #endif // OVR_Win32_DirectXAppUtil_h
-
-
-
-
-
-/*
-
-	//Done with other file loading, lets open file for output.
-	SYSTEMTIME syst;
-	GetSystemTime(&syst);
-	FILE * reportFile;
-	char fileName[100];
-	sprintf_s(fileName,100,"report_Date(%02d_%02d_%04d)_Time(%02d_%02d_%02d).txt",syst.wMonth,syst.wDay,syst.wYear,syst.wHour,syst.wMinute,syst.wSecond);
-	fopen_s(&reportFile, File.Path(fileName), "wt");
-
-	//....and lets also open Parse
-	ParseRecord t;
-	t.OpenRecord(L"ugO4eVcwGiZHMvk7334Me73pY8FOLY67GBgejoMn", L"sfEZ2E3Uf8bbdkEcvovjdQjTdOYaXPxMvISnWDEZ", L"Report");
-
-	//And write the first data into both
-	fprintf(reportFile,"----Comfort testing report file----     (View with Wordwrap off)\n\n");
-	fprintf(reportFile,"Code version    = %s\n",ComfortTestingCodeVersion);
-	fprintf(reportFile,"Headset         = %s\n",basicVR.HMD->ProductName);
-	fprintf(reportFile,"Serial number   = %s\n",basicVR.HMD->SerialNumber);
-	fprintf(reportFile,"Firmware        = %d.%d\n",basicVR.HMD->FirmwareMajor,basicVR.HMD->FirmwareMinor);
-	fprintf(reportFile,"Manufacturer    = %s\n",basicVR.HMD->Manufacturer);
-	fprintf(reportFile,"Resolution      = %d x %d\n",basicVR.HMD->Resolution.w,basicVR.HMD->Resolution.h);
-	fprintf(reportFile,"Date(US format) = %02d/%02d/%04d\n",syst.wMonth,syst.wDay,syst.wYear);
-	fprintf(reportFile,"Time            = %02d:%02d:%02d\n",syst.wHour,syst.wMinute,syst.wSecond);
-	fprintf(reportFile,"User            = %s\n",ovr_GetString(basicVR.HMD, OVR_KEY_USER, "Unknown"));
-	fprintf(reportFile,"Name            = %s\n",ovr_GetString(basicVR.HMD, OVR_KEY_NAME, "Unknown"));
-	fprintf(reportFile,"Gender          = %s\n",ovr_GetString(basicVR.HMD, OVR_KEY_GENDER, "Unknown"));
-	fprintf(reportFile,"Player height   = %f metres\n",ovr_GetFloat(basicVR.HMD, OVR_KEY_PLAYER_HEIGHT, -1));
-	fprintf(reportFile,"Eye height      = %f metres\n",ovr_GetFloat(basicVR.HMD, OVR_KEY_EYE_HEIGHT, -1));
-	fprintf(reportFile,"IPD             = %f metres\n",ovr_GetFloat(basicVR.HMD, OVR_KEY_IPD, -1));
-	fprintf(reportFile,"Eye relief dial = %d\n",ovr_GetInt(basicVR.HMD, OVR_KEY_EYE_RELIEF_DIAL, -1));
-
-	t.AddData("Code version", ComfortTestingCodeVersion);
-//	t.AddData("Headset",      "%s",basicVR.HMD->ProductName);
-//	t.AddData("Serial number","%s",basicVR.HMD->SerialNumber);
-
-	t.SendData();
-
-
-*/
