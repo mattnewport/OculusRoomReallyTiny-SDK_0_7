@@ -44,13 +44,21 @@ using namespace DirectX;
 #endif
 
 #define COM_SMARTPTR_TYPEDEF(x) _COM_SMARTPTR_TYPEDEF(x, __uuidof(x))
+COM_SMARTPTR_TYPEDEF(ID3D11BlendState);
 COM_SMARTPTR_TYPEDEF(ID3D11Buffer);
+COM_SMARTPTR_TYPEDEF(ID3D11DepthStencilState);
 COM_SMARTPTR_TYPEDEF(ID3D11DepthStencilView);
 COM_SMARTPTR_TYPEDEF(ID3D11Device);
 COM_SMARTPTR_TYPEDEF(ID3D11DeviceContext);
+COM_SMARTPTR_TYPEDEF(ID3D11InputLayout);
+COM_SMARTPTR_TYPEDEF(ID3D11PixelShader);
+COM_SMARTPTR_TYPEDEF(ID3D11RasterizerState);
 COM_SMARTPTR_TYPEDEF(ID3D11RenderTargetView);
+COM_SMARTPTR_TYPEDEF(ID3D11SamplerState);
 COM_SMARTPTR_TYPEDEF(ID3D11ShaderResourceView);
 COM_SMARTPTR_TYPEDEF(ID3D11Texture2D);
+COM_SMARTPTR_TYPEDEF(ID3D11VertexShader);
+COM_SMARTPTR_TYPEDEF(ID3DBlob);
 COM_SMARTPTR_TYPEDEF(IDXGIAdapter);
 COM_SMARTPTR_TYPEDEF(IDXGIDevice1);
 COM_SMARTPTR_TYPEDEF(IDXGIFactory);
@@ -319,13 +327,12 @@ struct Texture
         // Make local ones, because will be reducing them
         int sizeW = SizeW;
         int sizeH = SizeH;
-        for (int level = 0; level < MipLevels; level++) {
-            DIRECTX.Context->UpdateSubresource(Tex, level, NULL, (unsigned char*)pix, sizeW * 4,
-                                               sizeH * 4);
+        for (int level = 0; level < MipLevels; ++level) {
+            DIRECTX.Context->UpdateSubresource(Tex, level, nullptr, pix, sizeW * 4, sizeH * 4);
 
             for (int j = 0; j < (sizeH & ~1); j += 2) {
-                uint8_t* psrc = (uint8_t*)pix + (sizeW * j * 4);
-                uint8_t* pdest = (uint8_t*)pix + (sizeW * j);
+                uint8_t* psrc = reinterpret_cast<uint8_t*>(pix) + (sizeW * j * 4);
+                uint8_t* pdest = reinterpret_cast<uint8_t*>(pix) + (sizeW * j);
                 for (int i = 0; i<sizeW>> 1; i++, psrc += 8, pdest += 4) {
                     pdest[0] =
                         (((int)psrc[0]) + psrc[4] + psrc[sizeW * 4 + 0] + psrc[sizeW * 4 + 4]) >> 2;
@@ -342,140 +349,152 @@ struct Texture
         }
     }
 
-    static void ConvertToSRGB(DWORD * linear)
-	{
-		DWORD drgb[3];
-		for (int k = 0; k < 3; k++)
-		{
-			float rgb = ((float)((*linear >> (k * 8)) & 0xff)) / 255.0f;
-			rgb = pow(rgb, 2.2f);
-			drgb[k] = (DWORD)(rgb * 255.0f);
-		}
-		*linear = (*linear & 0xff000000) + (drgb[2] << 16) + (drgb[1] << 8) + (drgb[0] << 0);
-	}
+    static void ConvertToSRGB(DWORD* linear) {
+        DWORD drgb[3];
+        for (int k = 0; k < 3; k++) {
+            float rgb = ((float)((*linear >> (k * 8)) & 0xff)) / 255.0f;
+            rgb = pow(rgb, 2.2f);
+            drgb[k] = (DWORD)(rgb * 255.0f);
+        }
+        *linear = (*linear & 0xff000000) + (drgb[2] << 16) + (drgb[1] << 8) + (drgb[0] << 0);
+    }
 
-	void AutoFillTexture(int autoFillData)
-	{
-		DWORD * pix = (DWORD *)malloc(sizeof(DWORD) *  SizeW * SizeH);
-		for (int j = 0; j < SizeH; j++)
-		for (int i = 0; i < SizeW; i++)
-		{
-			DWORD * curr = &pix[j*SizeW + i];
-			switch (autoFillData)
-			{
-			case(AUTO_WALL) : *curr = (((j / 4 & 15) == 0) || (((i / 4 & 15) == 0) && ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0))) ?
-				0xff3c3c3c : 0xffb4b4b4; break;
-			case(AUTO_FLOOR) : *curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050; break;
-			case(AUTO_CEILING) : *curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4; break;
-			case(AUTO_WHITE) : *curr = 0xffffffff;              break;
-			case(AUTO_GRADE_256) : *curr = 0xff000000 + i*0x010101;              break;
-			case(AUTO_GRID) : *curr = (i<4) || (i>(SizeW - 5)) || (j<4) || (j>(SizeH - 5)) ? 0xffffffff : 0xff000000; break;
-			default: *curr = 0xffffffff;              break;
-			}
-			///ConvertToSRGB(curr); //Require format for SDK - I've been recommended to remove for now.
-		}
-		FillTexture(pix);
-	}
+    void AutoFillTexture(int autoFillData) {
+        std::vector<DWORD> pix(SizeW * SizeH);
+        for (int j = 0; j < SizeH; j++)
+            for (int i = 0; i < SizeW; i++) {
+                DWORD* curr = &pix[j * SizeW + i];
+                switch (autoFillData) {
+                    case (AUTO_WALL):
+                        *curr = (((j / 4 & 15) == 0) ||
+                                 (((i / 4 & 15) == 0) &&
+                                  ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
+                                    ? 0xff3c3c3c
+                                    : 0xffb4b4b4;
+                        break;
+                    case (AUTO_FLOOR):
+                        *curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
+                        break;
+                    case (AUTO_CEILING):
+                        *curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
+                        break;
+                    case (AUTO_WHITE):
+                        *curr = 0xffffffff;
+                        break;
+                    case (AUTO_GRADE_256):
+                        *curr = 0xff000000 + i * 0x010101;
+                        break;
+                    case (AUTO_GRID):
+                        *curr = (i < 4) || (i > (SizeW - 5)) || (j < 4) || (j > (SizeH - 5))
+                                    ? 0xffffffff
+                                    : 0xff000000;
+                        break;
+                    default:
+                        *curr = 0xffffffff;
+                        break;
+                }
+                /// ConvertToSRGB(curr); //Require format for SDK - I've been recommended to remove
+                /// for now.
+            }
+        FillTexture(pix.data());
+    }
 };
 
-//-----------------------------------------------------
-struct Material
-{
-	ID3D11VertexShader      * D3DVert;
-	ID3D11PixelShader       * D3DPix;
-	Texture                 * Tex;
-	ID3D11InputLayout       * InputLayout;
-	UINT                      VertexSize;
-	ID3D11SamplerState      * SamplerState;
-	ID3D11RasterizerState   * Rasterizer;
-	ID3D11DepthStencilState * DepthState;
-	ID3D11BlendState        * BlendState;
+struct Material {
+    ID3D11VertexShaderPtr D3DVert;
+    ID3D11PixelShaderPtr D3DPix;
+    std::unique_ptr<Texture> Tex;
+    ID3D11InputLayoutPtr InputLayout;
+    UINT VertexSize;
+    ID3D11SamplerStatePtr SamplerState;
+    ID3D11RasterizerStatePtr Rasterizer;
+    ID3D11DepthStencilStatePtr DepthState;
+    ID3D11BlendStatePtr BlendState;
 
-	enum { MAT_WRAP = 1, MAT_WIRE = 2, MAT_ZALWAYS = 4, MAT_NOCULL = 8 , MAT_TRANS = 16};
-	Material(Texture * t, DWORD flags = MAT_WRAP | MAT_TRANS, D3D11_INPUT_ELEMENT_DESC * vertexDesc = NULL, int numVertexDesc = 3,
-		char* vertexShader = NULL, char* pixelShader = NULL, int vSize = 24) : Tex(t), VertexSize(vSize)
-	{
-		D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
-			{ "Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
-			{ "Color",    0, DXGI_FORMAT_B8G8R8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-			{ "TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 }, };
+    enum { MAT_WRAP = 1, MAT_WIRE = 2, MAT_ZALWAYS = 4, MAT_NOCULL = 8, MAT_TRANS = 16 };
 
-		// Use defaults if no shaders specified
-		char* defaultVertexShaderSrc =
-			"float4x4 ProjView;  float4 MasterCol;"
-			"void main(in  float4 Position  : POSITION,    in  float4 Color : COLOR0, in  float2 TexCoord  : TEXCOORD0,"
-			"          out float4 oPosition : SV_Position, out float4 oColor: COLOR0, out float2 oTexCoord : TEXCOORD0)"
-			"{   oPosition = mul(ProjView, Position); oTexCoord = TexCoord; "
-			"    oColor = MasterCol * Color; }"; 
-		char* defaultPixelShaderSrc =
-			"Texture2D Texture   : register(t0); SamplerState Linear : register(s0); "
-			"float4 main(in float4 Position : SV_Position, in float4 Color: COLOR0, in float2 TexCoord : TEXCOORD0) : SV_Target"
-			"{   float4 TexCol = Texture.Sample(Linear, TexCoord); "
-			"    if (TexCol.a==0) clip(-1); " // If alpha = 0, don't draw
-			"    return(Color * TexCol); }";
+    Material(Texture* t)
+        : Tex(t), VertexSize(24) {
+        D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
+            {"Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        };
 
-		if (!vertexDesc)   vertexDesc = defaultVertexDesc;
-		if (!vertexShader) vertexShader = defaultVertexShaderSrc;
-		if (!pixelShader)  pixelShader = defaultPixelShaderSrc;
+        const DWORD flags = MAT_WRAP | MAT_TRANS;
 
-		// Create vertex shader
-		ID3DBlob * blobData;
-		D3DCompile(vertexShader, strlen(vertexShader), 0, 0, 0, "main", "vs_4_0", 0, 0, &blobData, 0);
-		DIRECTX.Device->CreateVertexShader(blobData->GetBufferPointer(), blobData->GetBufferSize(), NULL, &D3DVert);
+        // Use defaults if no shaders specified
+        const char* defaultVertexShaderSrc =
+            "float4x4 ProjView;  float4 MasterCol;"
+            "void main(in  float4 Position  : POSITION,    in  float4 Color : COLOR0, in  float2 "
+            "TexCoord  : TEXCOORD0,"
+            "          out float4 oPosition : SV_Position, out float4 oColor: COLOR0, out float2 "
+            "oTexCoord : TEXCOORD0)"
+            "{   oPosition = mul(ProjView, Position); oTexCoord = TexCoord; "
+            "    oColor = MasterCol * Color; }";
+        const char* defaultPixelShaderSrc =
+            "Texture2D Texture   : register(t0); SamplerState Linear : register(s0); "
+            "float4 main(in float4 Position : SV_Position, in float4 Color: COLOR0, in float2 "
+            "TexCoord : TEXCOORD0) : SV_Target"
+            "{   float4 TexCol = Texture.Sample(Linear, TexCoord); "
+            "    if (TexCol.a==0) clip(-1); "  // If alpha = 0, don't draw
+            "    return(Color * TexCol); }";
 
-		// Create input layout
-		DIRECTX.Device->CreateInputLayout(vertexDesc, numVertexDesc,
-			blobData->GetBufferPointer(), blobData->GetBufferSize(), &InputLayout); 
-		blobData->Release();
+        // Create vertex shader
+        ID3DBlobPtr blobData;
+        D3DCompile(defaultVertexShaderSrc, strlen(defaultVertexShaderSrc), nullptr, nullptr,
+                   nullptr, "main", "vs_4_0", 0, 0, &blobData, nullptr);
+        DIRECTX.Device->CreateVertexShader(blobData->GetBufferPointer(), blobData->GetBufferSize(),
+                                           nullptr, &D3DVert);
 
-		// Create pixel shader
-		D3DCompile(pixelShader, strlen(pixelShader), 0, 0, 0, "main", "ps_4_0", 0, 0, &blobData, 0);
-		DIRECTX.Device->CreatePixelShader(blobData->GetBufferPointer(), blobData->GetBufferSize(), NULL, &D3DPix);
-		blobData->Release();
+        // Create input layout
+        DIRECTX.Device->CreateInputLayout(
+            defaultVertexDesc,
+            std::distance(std::begin(defaultVertexDesc), std::end(defaultVertexDesc)),
+            blobData->GetBufferPointer(), blobData->GetBufferSize(), &InputLayout);
 
-		// Create sampler state
-		D3D11_SAMPLER_DESC ss; memset(&ss, 0, sizeof(ss));
-		ss.AddressU = ss.AddressV = ss.AddressW = flags & MAT_WRAP ? D3D11_TEXTURE_ADDRESS_WRAP : D3D11_TEXTURE_ADDRESS_BORDER;
-		ss.Filter = D3D11_FILTER_ANISOTROPIC;
-		ss.MaxAnisotropy = 8;
-		ss.MaxLOD = 15;
-		DIRECTX.Device->CreateSamplerState(&ss, &SamplerState);
+        // Create pixel shader
+        D3DCompile(defaultPixelShaderSrc, strlen(defaultPixelShaderSrc), nullptr, nullptr, nullptr,
+                   "main", "ps_4_0", 0, 0, &blobData, nullptr);
+        DIRECTX.Device->CreatePixelShader(blobData->GetBufferPointer(), blobData->GetBufferSize(),
+                                          nullptr, &D3DPix);
 
-		// Create rasterizer
-		D3D11_RASTERIZER_DESC rs; memset(&rs, 0, sizeof(rs));
-		rs.AntialiasedLineEnable = rs.DepthClipEnable = true;
-		rs.CullMode = flags & MAT_NOCULL ? D3D11_CULL_NONE : D3D11_CULL_BACK;
-		rs.FillMode = flags & MAT_WIRE ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
-		DIRECTX.Device->CreateRasterizerState(&rs, &Rasterizer);
+        // Create sampler state
+        D3D11_SAMPLER_DESC ss;
+        memset(&ss, 0, sizeof(ss));
+        ss.AddressU = ss.AddressV = ss.AddressW =
+            flags & MAT_WRAP ? D3D11_TEXTURE_ADDRESS_WRAP : D3D11_TEXTURE_ADDRESS_BORDER;
+        ss.Filter = D3D11_FILTER_ANISOTROPIC;
+        ss.MaxAnisotropy = 8;
+        ss.MaxLOD = 15;
+        DIRECTX.Device->CreateSamplerState(&ss, &SamplerState);
 
-		// Create depth state
-		D3D11_DEPTH_STENCIL_DESC dss;
-		memset(&dss, 0, sizeof(dss));
-		dss.DepthEnable = true;
-		dss.DepthFunc = flags & MAT_ZALWAYS ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_LESS;
-		dss.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-		DIRECTX.Device->CreateDepthStencilState(&dss, &DepthState);
+        // Create rasterizer
+        D3D11_RASTERIZER_DESC rs;
+        memset(&rs, 0, sizeof(rs));
+        rs.AntialiasedLineEnable = rs.DepthClipEnable = true;
+        rs.CullMode = flags & MAT_NOCULL ? D3D11_CULL_NONE : D3D11_CULL_BACK;
+        rs.FillMode = flags & MAT_WIRE ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+        DIRECTX.Device->CreateRasterizerState(&rs, &Rasterizer);
 
-		//Create blend state - trans or otherwise
-		D3D11_BLEND_DESC bm;
-		memset(&bm, 0, sizeof(bm));
-		bm.RenderTarget[0].BlendEnable = flags & MAT_TRANS ? true : false;
-		bm.RenderTarget[0].BlendOp = bm.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-		bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
-		bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-		bm.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-		DIRECTX.Device->CreateBlendState(&bm, &BlendState);
-	}
-    ~Material()
-    {
-        Release(D3DVert);
-        Release(D3DPix);
-        delete Tex; Tex = nullptr;
-        Release(InputLayout);
-        Release(SamplerState);
-        Release(Rasterizer);
-        Release(DepthState);
-        Release(BlendState);
+        // Create depth state
+        D3D11_DEPTH_STENCIL_DESC dss;
+        memset(&dss, 0, sizeof(dss));
+        dss.DepthEnable = true;
+        dss.DepthFunc = flags & MAT_ZALWAYS ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_LESS;
+        dss.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        DIRECTX.Device->CreateDepthStencilState(&dss, &DepthState);
+
+        // Create blend state - trans or otherwise
+        D3D11_BLEND_DESC bm;
+        memset(&bm, 0, sizeof(bm));
+        bm.RenderTarget[0].BlendEnable = flags & MAT_TRANS ? true : false;
+        bm.RenderTarget[0].BlendOp = bm.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+        bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
+            D3D11_BLEND_INV_SRC_ALPHA;
+        bm.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        DIRECTX.Device->CreateBlendState(&bm, &BlendState);
     }
 };
 
@@ -621,7 +640,8 @@ struct Model
 		DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		DIRECTX.Context->VSSetShader(Fill->D3DVert, NULL, 0);
 		DIRECTX.Context->PSSetShader(Fill->D3DPix, NULL, 0);
-		DIRECTX.Context->PSSetSamplers(0, 1, &Fill->SamplerState);
+        ID3D11SamplerState* samplerStates[] = { Fill->SamplerState };
+		DIRECTX.Context->PSSetSamplers(0, std::distance(std::begin(samplerStates), std::end(samplerStates)), samplerStates);
 		DIRECTX.Context->RSSetState(Fill->Rasterizer);
 		DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
 		DIRECTX.Context->OMSetBlendState(Fill->BlendState, NULL, 0xffffffff);
