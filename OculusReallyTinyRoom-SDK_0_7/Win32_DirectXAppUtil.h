@@ -20,25 +20,55 @@ limitations under the License.
 #ifndef OVR_Win32_DirectXAppUtil_h
 #define OVR_Win32_DirectXAppUtil_h
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <iterator>
+#include <memory>
 #include <vector>
-#include "d3dcompiler.h"
-#include "d3d11.h"
-#include "stdio.h"
-#if _MSC_VER > 1600
-#include "DirectXMath.h"
-using namespace DirectX;
-#else
-#include "xnamath.h"
-#endif //_MSC_VER > 1600
 
-#pragma comment(lib, "dxgi.lib")
+#include <comdef.h>
+#include <comip.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <DirectXMath.h>
+
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "dxgi.lib")
+
+using namespace DirectX;
 
 #ifndef VALIDATE
     #define VALIDATE(x, msg) if (!(x)) { MessageBoxA(NULL, (msg), "OculusRoomTiny", MB_ICONERROR | MB_OK); exit(-1); }
 #endif
+
+#define COM_SMARTPTR_TYPEDEF(x) _COM_SMARTPTR_TYPEDEF(x, __uuidof(x))
+COM_SMARTPTR_TYPEDEF(ID3D11Buffer);
+COM_SMARTPTR_TYPEDEF(ID3D11DepthStencilView);
+COM_SMARTPTR_TYPEDEF(ID3D11Device);
+COM_SMARTPTR_TYPEDEF(ID3D11DeviceContext);
+COM_SMARTPTR_TYPEDEF(ID3D11RenderTargetView);
+COM_SMARTPTR_TYPEDEF(ID3D11ShaderResourceView);
+COM_SMARTPTR_TYPEDEF(ID3D11Texture2D);
+COM_SMARTPTR_TYPEDEF(IDXGIAdapter);
+COM_SMARTPTR_TYPEDEF(IDXGIDevice1);
+COM_SMARTPTR_TYPEDEF(IDXGIFactory);
+COM_SMARTPTR_TYPEDEF(IDXGISwapChain);
+
+struct DepthBuffer {
+    ID3D11DepthStencilViewPtr TexDsv;
+
+    DepthBuffer(ID3D11Device* Device, int sizeW, int sizeH, int sampleCount = 1) {
+        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, sizeW, sizeH);
+        dsDesc.MipLevels = 1;
+        dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        dsDesc.SampleDesc.Count = sampleCount;
+        ID3D11Texture2DPtr Tex;
+        Device->CreateTexture2D(&dsDesc, NULL, &Tex);
+        Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
+    }
+};
 
 // clean up member COM pointers
 template<typename T> void Release(T *&obj)
@@ -48,378 +78,271 @@ template<typename T> void Release(T *&obj)
     obj = nullptr;
 }
 
-//------------------------------------------------------------
-struct DepthBuffer
-{
-    ID3D11DepthStencilView * TexDsv;
+struct DataBuffer {
+    ID3D11BufferPtr D3DBuffer;
+    size_t Size;
 
-    DepthBuffer(ID3D11Device * Device, int sizeW, int sizeH, int sampleCount = 1)
-    {
-        DXGI_FORMAT format = DXGI_FORMAT_D32_FLOAT;
-        D3D11_TEXTURE2D_DESC dsDesc;
-        dsDesc.Width = sizeW;
-        dsDesc.Height = sizeH;
-        dsDesc.MipLevels = 1;
-        dsDesc.ArraySize = 1;
-        dsDesc.Format = format;
-        dsDesc.SampleDesc.Count = sampleCount;
-        dsDesc.SampleDesc.Quality = 0;
-        dsDesc.Usage = D3D11_USAGE_DEFAULT;
-        dsDesc.CPUAccessFlags = 0;
-        dsDesc.MiscFlags = 0;
-        dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        ID3D11Texture2D * Tex;
-        Device->CreateTexture2D(&dsDesc, NULL, &Tex);
-        Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
-    }
-    ~DepthBuffer()
-    {
-        Release(TexDsv);
+    DataBuffer(ID3D11Device* Device, D3D11_BIND_FLAG use, const void* buffer, size_t size)
+        : Size(size) {
+        CD3D11_BUFFER_DESC desc(size, use, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        D3D11_SUBRESOURCE_DATA sr{buffer, 0, 0};
+        Device->CreateBuffer(&desc, buffer ? &sr : nullptr, &D3DBuffer);
     }
 };
 
-//----------------------------------------------------------------
-struct DataBuffer
-{
-    ID3D11Buffer * D3DBuffer;
-    size_t         Size;
-
-    DataBuffer(ID3D11Device * Device, D3D11_BIND_FLAG use, const void* buffer, size_t size) : Size(size)
-    {
-        D3D11_BUFFER_DESC desc;   memset(&desc, 0, sizeof(desc));
-        desc.Usage = D3D11_USAGE_DYNAMIC;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        desc.BindFlags = use;
-        desc.ByteWidth = (unsigned)size;
-        D3D11_SUBRESOURCE_DATA sr;
-        sr.pSysMem = buffer;
-        sr.SysMemPitch = sr.SysMemSlicePitch = 0;
-        Device->CreateBuffer(&desc, buffer ? &sr : NULL, &D3DBuffer);
-    }
-    ~DataBuffer()
-    {
-        Release(D3DBuffer);
-    }
-};
-
-//---------------------------------------------------------------------
-struct DirectX11
-{
-	HWND                     Window;
-	bool                     Running;
-	bool                     Key[256];
-	int                      WinSizeW;
-	int                      WinSizeH;
-	ID3D11Device           * Device;
-	ID3D11DeviceContext    * Context;
-	IDXGISwapChain         * SwapChain;
-	DepthBuffer            * MainDepthBuffer;
-	ID3D11Texture2D        * BackBuffer;
-	ID3D11RenderTargetView * BackBufferRT;
+struct DirectX11 {
+    HWND Window = nullptr;
+    bool Running = false;
+    bool Key[256];
+    int WinSizeW = 0;
+    int WinSizeH = 0;
+    ID3D11DevicePtr Device;
+    ID3D11DeviceContextPtr Context;
+    IDXGISwapChainPtr SwapChain;
+    std::unique_ptr<DepthBuffer> MainDepthBuffer;
+    ID3D11Texture2DPtr BackBuffer;
+    ID3D11RenderTargetViewPtr BackBufferRT;
     // Fixed size buffer for shader constants, before copied into buffer
-    static const int         UNIFORM_DATA_SIZE = 2000;
-	unsigned char            UniformData[UNIFORM_DATA_SIZE];
-	DataBuffer             * UniformBufferGen;
-    HINSTANCE                hInstance;
+    static const int UNIFORM_DATA_SIZE = 2000;
+    unsigned char UniformData[UNIFORM_DATA_SIZE];
+    std::unique_ptr<DataBuffer> UniformBufferGen;
+    HINSTANCE hInstance = nullptr;
 
-	static LRESULT CALLBACK WindowProc(_In_ HWND hWnd, _In_ UINT Msg, _In_ WPARAM wParam, _In_ LPARAM lParam)
-	{
-        auto p = reinterpret_cast<DirectX11 *>(GetWindowLongPtr(hWnd, 0));
-        switch (Msg)
-        {
-        case WM_KEYDOWN:
-            p->Key[wParam] = true;
-            break;
-        case WM_KEYUP:
-            p->Key[wParam] = false;
-            break;
-        case WM_DESTROY:
-            p->Running = false;
-            break;
-        default:
-            return DefWindowProcW(hWnd, Msg, wParam, lParam);
+    static LRESULT CALLBACK WindowProc(_In_ HWND hWnd, _In_ UINT Msg, _In_ WPARAM wParam,
+                                       _In_ LPARAM lParam) {
+        auto p = reinterpret_cast<DirectX11*>(GetWindowLongPtr(hWnd, 0));
+        switch (Msg) {
+            case WM_KEYDOWN:
+                p->Key[wParam] = true;
+                break;
+            case WM_KEYUP:
+                p->Key[wParam] = false;
+                break;
+            case WM_DESTROY:
+                p->Running = false;
+                break;
+            default:
+                return DefWindowProcW(hWnd, Msg, wParam, lParam);
         }
-        if ((p->Key['Q'] && p->Key[VK_CONTROL]) || p->Key[VK_ESCAPE])
-        {
+        if ((p->Key['Q'] && p->Key[VK_CONTROL]) || p->Key[VK_ESCAPE]) {
             p->Running = false;
         }
         return 0;
-	}
-
-    DirectX11() :
-        Window(nullptr),
-        Running(false),
-        WinSizeW(0),
-        WinSizeH(0),
-        Device(nullptr),
-        Context(nullptr),
-        SwapChain(nullptr),
-        MainDepthBuffer(nullptr),
-        BackBuffer(nullptr),
-        BackBufferRT(nullptr),
-        UniformBufferGen(nullptr),
-        hInstance(nullptr)
-    {
-		// Clear input
-		for (int i = 0; i < sizeof(Key)/sizeof(Key[0]); ++i)
-            Key[i] = false;
     }
 
-    ~DirectX11()
-	{
+    DirectX11() {
+        // Clear input
+        std::fill(std::begin(Key), std::end(Key), false);
+    }
+
+    ~DirectX11() {
         ReleaseDevice();
         CloseWindow();
     }
 
-    bool InitWindow(HINSTANCE hinst, LPCWSTR title)
-	{
+    bool InitWindow(HINSTANCE hinst, LPCWSTR title) {
         hInstance = hinst;
-		Running = true;
+        Running = true;
 
-		WNDCLASSW wc;
-        memset(&wc, 0, sizeof(wc));
-		wc.lpszClassName = L"App";
-		wc.style = CS_OWNDC;
-		wc.lpfnWndProc = WindowProc;
-		wc.cbWndExtra = sizeof(this);
-		RegisterClassW(&wc);
+        WNDCLASSW wc{};
+        wc.lpszClassName = L"App";
+        wc.style = CS_OWNDC;
+        wc.lpfnWndProc = WindowProc;
+        wc.cbWndExtra = sizeof(this);
+        RegisterClassW(&wc);
 
         // adjust the window size and show at InitDevice time
-		Window = CreateWindowW(wc.lpszClassName, title, WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, 0, 0, hinst, 0);
+        Window =
+            CreateWindowW(wc.lpszClassName, title, WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, 0, 0, hinst, 0);
         if (!Window) return false;
 
-		SetWindowLongPtr(Window, 0, LONG_PTR(this));
+        SetWindowLongPtr(Window, 0, LONG_PTR(this));
 
         return true;
-	}
+    }
 
-    void CloseWindow()
-    {
-        if (Window)
-        {
-	        DestroyWindow(Window);
-	        Window = nullptr;
-	        UnregisterClassW(L"App", hInstance);
+    void CloseWindow() {
+        if (Window) {
+            DestroyWindow(Window);
+            Window = nullptr;
+            UnregisterClassW(L"App", hInstance);
         }
     }
 
-    bool InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true)
-	{
-		WinSizeW = vpW;
-		WinSizeH = vpH;
+    bool InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true) {
+        WinSizeW = vpW;
+        WinSizeH = vpH;
 
-		RECT size = { 0, 0, vpW, vpH };
-		AdjustWindowRect(&size, WS_OVERLAPPEDWINDOW, false);
+        RECT size = {0, 0, vpW, vpH};
+        AdjustWindowRect(&size, WS_OVERLAPPEDWINDOW, false);
         const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
-        if (!SetWindowPos(Window, nullptr, 0, 0, size.right - size.left, size.bottom - size.top, flags))
+        if (!SetWindowPos(Window, nullptr, 0, 0, size.right - size.left, size.bottom - size.top,
+                          flags))
             return false;
 
-		IDXGIFactory * DXGIFactory = nullptr;
-		HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory), (void**)(&DXGIFactory));
+        IDXGIFactoryPtr DXGIFactory;
+        HRESULT hr =
+            CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
         VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
 
-		IDXGIAdapter * Adapter = nullptr;
-        for (UINT iAdapter = 0; DXGIFactory->EnumAdapters(iAdapter, &Adapter) != DXGI_ERROR_NOT_FOUND; ++iAdapter)
-        {
+        IDXGIAdapterPtr Adapter;
+        for (UINT iAdapter = 0;
+             DXGIFactory->EnumAdapters(iAdapter, &Adapter) != DXGI_ERROR_NOT_FOUND; ++iAdapter) {
             DXGI_ADAPTER_DESC adapterDesc;
             Adapter->GetDesc(&adapterDesc);
             if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0)
                 break;
-            Release(Adapter);
         }
 
+        const D3D11_CREATE_DEVICE_FLAG createFlags = [] {
+#ifdef _DEBUG
+            return D3D11_CREATE_DEVICE_DEBUG;
+#else
+            return 0;
+#endif
+        }();
         auto DriverType = Adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
-        hr = D3D11CreateDevice(Adapter, DriverType, 0, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0,
-                               D3D11_SDK_VERSION, &Device, nullptr, &Context);
-        Release(Adapter);
+        hr = D3D11CreateDevice(Adapter, DriverType, 0, createFlags, nullptr, 0, D3D11_SDK_VERSION,
+                               &Device, nullptr, &Context);
         VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
 
-		// Create swap chain
-		DXGI_SWAP_CHAIN_DESC scDesc;
-        memset(&scDesc, 0, sizeof(scDesc));
-		scDesc.BufferCount = 2;
-		scDesc.BufferDesc.Width = WinSizeW;
-		scDesc.BufferDesc.Height = WinSizeH;
-		scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		scDesc.BufferDesc.RefreshRate.Denominator = 1;
-		scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		scDesc.OutputWindow = Window;
-		scDesc.SampleDesc.Count = 1;
-		scDesc.Windowed = windowed;
-		scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
-		hr = DXGIFactory->CreateSwapChain(Device, &scDesc, &SwapChain);
-        Release(DXGIFactory);
+        // Create swap chain
+        DXGI_SWAP_CHAIN_DESC scDesc{};
+        scDesc.BufferCount = 2;
+        scDesc.BufferDesc.Width = WinSizeW;
+        scDesc.BufferDesc.Height = WinSizeH;
+        scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        scDesc.BufferDesc.RefreshRate.Denominator = 1;
+        scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        scDesc.OutputWindow = Window;
+        scDesc.SampleDesc.Count = 1;
+        scDesc.Windowed = windowed;
+        scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
+        hr = DXGIFactory->CreateSwapChain(Device, &scDesc, &SwapChain);
         VALIDATE((hr == ERROR_SUCCESS), "CreateSwapChain failed");
 
-		// Create backbuffer
-		SwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&BackBuffer);
-		hr = Device->CreateRenderTargetView(BackBuffer, NULL, &BackBufferRT);
+        // Create backbuffer
+        SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
+        hr = Device->CreateRenderTargetView(BackBuffer, nullptr, &BackBufferRT);
         VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
 
-		// Main depth buffer
-		MainDepthBuffer = new DepthBuffer(Device, WinSizeW, WinSizeH);
-		Context->OMSetRenderTargets(1, &BackBufferRT, MainDepthBuffer->TexDsv);
+        // Main depth buffer
+        MainDepthBuffer = std::make_unique<DepthBuffer>(Device, WinSizeW, WinSizeH);
+        ID3D11RenderTargetView* rts[] = {BackBufferRT};
+        Context->OMSetRenderTargets(std::distance(std::begin(rts), std::end(rts)), rts,
+                                    MainDepthBuffer->TexDsv);
 
-		// Buffer for shader constants
-        UniformBufferGen = new DataBuffer(Device, D3D11_BIND_CONSTANT_BUFFER, NULL, UNIFORM_DATA_SIZE);
-		Context->VSSetConstantBuffers(0, 1, &UniformBufferGen->D3DBuffer);
+        // Buffer for shader constants
+        UniformBufferGen = std::make_unique<DataBuffer>(Device, D3D11_BIND_CONSTANT_BUFFER, nullptr,
+                                                        UNIFORM_DATA_SIZE);
+        ID3D11Buffer* buffs[] = {UniformBufferGen->D3DBuffer};
+        Context->VSSetConstantBuffers(0, std::distance(std::begin(buffs), std::end(buffs)), buffs);
 
-		// Set max frame latency to 1
-		IDXGIDevice1* DXGIDevice1 = nullptr;
-	    hr = Device->QueryInterface(__uuidof(IDXGIDevice1), (void**)&DXGIDevice1);
-		DXGIDevice1->SetMaximumFrameLatency(1);
-		Release(DXGIDevice1);
+        // Set max frame latency to 1
+        IDXGIDevice1Ptr DXGIDevice1;
+        hr = Device.QueryInterface(DXGIDevice1.GetIID(), &DXGIDevice1);
         VALIDATE((hr == ERROR_SUCCESS), "QueryInterface failed");
+        DXGIDevice1->SetMaximumFrameLatency(1);
 
         return true;
-	}
+    }
 
-	void SetAndClearRenderTarget(ID3D11RenderTargetView * rendertarget, struct DepthBuffer * depthbuffer, float R = 0, float G = 0, float B = 0, float A = 0)
-	{
-		float black[] = { R, G, B, A }; // Important that alpha=0, if want pixels to be transparent, for manual layers
-		Context->OMSetRenderTargets(1, &rendertarget, depthbuffer->TexDsv);
-		Context->ClearRenderTargetView(rendertarget, black);
-		Context->ClearDepthStencilView(depthbuffer->TexDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1, 0);
-	}
+    void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget, DepthBuffer* depthbuffer) {
+        float black[] = {0.0f, 0.0f, 0.0f, 0.0f};
+        Context->OMSetRenderTargets(1, &rendertarget, depthbuffer->TexDsv);
+        Context->ClearRenderTargetView(rendertarget, black);
+        Context->ClearDepthStencilView(depthbuffer->TexDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
+                                       1, 0);
+    }
 
-	void SetViewport(float vpX, float vpY, float vpW, float vpH)
-	{
-		D3D11_VIEWPORT D3Dvp;
-		D3Dvp.Width = vpW;    D3Dvp.Height = vpH;
-		D3Dvp.MinDepth = 0;   D3Dvp.MaxDepth = 1;
-		D3Dvp.TopLeftX = vpX; D3Dvp.TopLeftY = vpY;
-		Context->RSSetViewports(1, &D3Dvp);
-	}
+    void SetViewport(float vpX, float vpY, float vpW, float vpH) {
+        D3D11_VIEWPORT D3Dvp{vpX, vpY, vpW, vpH, 0.0f, 1.0f};
+        Context->RSSetViewports(1, &D3Dvp);
+    }
 
-	bool HandleMessages(void)
-	{
-		MSG msg;
-		while (PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
-		{
-			TranslateMessage(&msg);
-			DispatchMessage(&msg);
-		}
-		// This is to provide a means to terminate after a maximum number of frames
-		// to facilitate automated testing
-        #ifdef MAX_FRAMES_ACTIVE 
-		    if (--maxFrames <= 0)
-			    Running = false;
-        #endif
-		return Running;
-	}
+    bool HandleMessages() {
+        MSG msg{};
+        while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        return Running;
+    }
 
-    void Run(bool (*MainLoop)(bool retryCreate))
-    {
+    void Run(bool (*MainLoop)(bool retryCreate)) {
         // false => just fail on any error
         VALIDATE(MainLoop(false), "Oculus Rift not detected.");
-        while (HandleMessages())
-        {
+        while (HandleMessages()) {
             // true => we'll attempt to retry for ovrError_DisplayLost
-            if (!MainLoop(true))
-                break;
+            if (!MainLoop(true)) break;
             // Sleep a bit before retrying to reduce CPU load while the HMD is disconnected
             Sleep(10);
         }
     }
 
-	void ReleaseDevice()
-	{
-        Release(BackBuffer);
-        Release(BackBufferRT);
-        if (SwapChain)
-        {
+    void ReleaseDevice() {
+        if (SwapChain) {
             SwapChain->SetFullscreenState(FALSE, NULL);
-            Release(SwapChain);
         }
-        Release(Context);
-        Release(Device);
-        delete MainDepthBuffer;
-        MainDepthBuffer = nullptr;
-        delete UniformBufferGen;
-        UniformBufferGen = nullptr;
-	}
+    }
 };
 
 // global DX11 state
 static struct DirectX11 DIRECTX;
 
-//------------------------------------------------------------
 struct Texture
 {
-	ID3D11Texture2D            * Tex;
-	ID3D11ShaderResourceView   * TexSv;
-	ID3D11RenderTargetView     * TexRtv;
-	int                          SizeW, SizeH, MipLevels;
+    ID3D11Texture2DPtr Tex;
+    ID3D11ShaderResourceViewPtr TexSv;
+    ID3D11RenderTargetViewPtr TexRtv;
+    int SizeW, SizeH, MipLevels;
 
-	enum { AUTO_WHITE = 1, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING, AUTO_GRID, AUTO_GRADE_256 };
-	Texture() : Tex(nullptr), TexSv(nullptr), TexRtv(nullptr) {};
-    void Init(int sizeW, int sizeH, bool rendertarget, int mipLevels, int sampleCount)
-    {
-        SizeW = sizeW;
-        SizeH = sizeH;
-        MipLevels = mipLevels;
+    enum { AUTO_WHITE = 1, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING, AUTO_GRID, AUTO_GRADE_256 };
+    Texture(int sizeW, int sizeH, bool rendertarget, int mipLevels = 1, int sampleCount = 1)
+        : SizeW{sizeW}, SizeH{sizeH}, MipLevels{mipLevels} {
+        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH);
+        dsDesc.MipLevels = MipLevels;
+        dsDesc.SampleDesc.Count = sampleCount;
+        if (rendertarget) dsDesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
 
-		D3D11_TEXTURE2D_DESC dsDesc;
-		dsDesc.Width = SizeW;
-		dsDesc.Height = SizeH;
-		dsDesc.MipLevels = MipLevels;
-		dsDesc.ArraySize = 1;
-		dsDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		dsDesc.SampleDesc.Count = sampleCount;
-		dsDesc.SampleDesc.Quality = 0;
-		dsDesc.Usage = D3D11_USAGE_DEFAULT;
-		dsDesc.CPUAccessFlags = 0;
-		dsDesc.MiscFlags = 0;
-		dsDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		if (rendertarget) dsDesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
-
-		DIRECTX.Device->CreateTexture2D(&dsDesc, NULL, &Tex);
-		DIRECTX.Device->CreateShaderResourceView(Tex, NULL, &TexSv);
-        TexRtv = nullptr;
-		if (rendertarget) DIRECTX.Device->CreateRenderTargetView(Tex, NULL, &TexRtv);
-    }
-	Texture(int sizeW, int sizeH, bool rendertarget, int mipLevels = 1, int sampleCount = 1)
-	{
-        Init(sizeW, sizeH, rendertarget, mipLevels, sampleCount);
-	}
-	Texture(bool rendertarget, int sizeW, int sizeH, int autoFillData = 0, int sampleCount = 1)
-	{
-        Init(sizeW, sizeH, rendertarget, autoFillData ? 8 : 1, sampleCount);
-		if (autoFillData) AutoFillTexture(autoFillData);
-	}
-    ~Texture()
-    {
-        Release(TexRtv);
-        Release(TexSv);
-        Release(Tex);
+        DIRECTX.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
+        DIRECTX.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
+        if (rendertarget) DIRECTX.Device->CreateRenderTargetView(Tex, nullptr, &TexRtv);
     }
 
-	void FillTexture(DWORD * pix)
-	{
-		//Make local ones, because will be reducing them
-		int sizeW = SizeW; 
-		int sizeH = SizeH;
-		for (int level = 0; level < MipLevels; level++)
-		{
-			DIRECTX.Context->UpdateSubresource(Tex, level, NULL, (unsigned char *)pix, sizeW * 4, sizeH * 4);
+    Texture(bool rendertarget, int sizeW, int sizeH, int autoFillData = 0, int sampleCount = 1)
+        : Texture{sizeW, sizeH, rendertarget, autoFillData ? 8 : 1, sampleCount} {
+        if (autoFillData) AutoFillTexture(autoFillData);
+    }
 
-			for (int j = 0; j < (sizeH & ~1); j += 2)
-			{
-				uint8_t* psrc = (uint8_t *)pix + (sizeW * j * 4);
-				uint8_t* pdest = (uint8_t *)pix + (sizeW * j);
-				for (int i = 0; i < sizeW >> 1; i++, psrc += 8, pdest += 4)
-				{
-					pdest[0] = (((int)psrc[0]) + psrc[4] + psrc[sizeW * 4 + 0] + psrc[sizeW * 4 + 4]) >> 2;
-					pdest[1] = (((int)psrc[1]) + psrc[5] + psrc[sizeW * 4 + 1] + psrc[sizeW * 4 + 5]) >> 2;
-					pdest[2] = (((int)psrc[2]) + psrc[6] + psrc[sizeW * 4 + 2] + psrc[sizeW * 4 + 6]) >> 2;
-					pdest[3] = (((int)psrc[3]) + psrc[7] + psrc[sizeW * 4 + 3] + psrc[sizeW * 4 + 7]) >> 2;
-				}
-			}
-			sizeW >>= 1;  sizeH >>= 1;
-		}
-	}
+    void FillTexture(DWORD* pix) {
+        // Make local ones, because will be reducing them
+        int sizeW = SizeW;
+        int sizeH = SizeH;
+        for (int level = 0; level < MipLevels; level++) {
+            DIRECTX.Context->UpdateSubresource(Tex, level, NULL, (unsigned char*)pix, sizeW * 4,
+                                               sizeH * 4);
 
-	static void ConvertToSRGB(DWORD * linear)
+            for (int j = 0; j < (sizeH & ~1); j += 2) {
+                uint8_t* psrc = (uint8_t*)pix + (sizeW * j * 4);
+                uint8_t* pdest = (uint8_t*)pix + (sizeW * j);
+                for (int i = 0; i<sizeW>> 1; i++, psrc += 8, pdest += 4) {
+                    pdest[0] =
+                        (((int)psrc[0]) + psrc[4] + psrc[sizeW * 4 + 0] + psrc[sizeW * 4 + 4]) >> 2;
+                    pdest[1] =
+                        (((int)psrc[1]) + psrc[5] + psrc[sizeW * 4 + 1] + psrc[sizeW * 4 + 5]) >> 2;
+                    pdest[2] =
+                        (((int)psrc[2]) + psrc[6] + psrc[sizeW * 4 + 2] + psrc[sizeW * 4 + 6]) >> 2;
+                    pdest[3] =
+                        (((int)psrc[3]) + psrc[7] + psrc[sizeW * 4 + 3] + psrc[sizeW * 4 + 7]) >> 2;
+                }
+            }
+            sizeW >>= 1;
+            sizeH >>= 1;
+        }
+    }
+
+    static void ConvertToSRGB(DWORD * linear)
 	{
 		DWORD drgb[3];
 		for (int k = 0; k < 3; k++)
@@ -693,7 +616,8 @@ struct Model
 		DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
 		DIRECTX.Context->IASetIndexBuffer(IndexBuffer->D3DBuffer, DXGI_FORMAT_R16_UINT, 0);
 		UINT offset = 0;
-		DIRECTX.Context->IASetVertexBuffers(0, 1, &VertexBuffer->D3DBuffer, &Fill->VertexSize, &offset);
+        ID3D11Buffer* vbs[] = { VertexBuffer->D3DBuffer };
+		DIRECTX.Context->IASetVertexBuffers(0, std::distance(std::begin(vbs), std::end(vbs)), vbs, &Fill->VertexSize, &offset);
 		DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		DIRECTX.Context->VSSetShader(Fill->D3DVert, NULL, 0);
 		DIRECTX.Context->PSSetShader(Fill->D3DPix, NULL, 0);
@@ -701,7 +625,8 @@ struct Model
 		DIRECTX.Context->RSSetState(Fill->Rasterizer);
 		DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
 		DIRECTX.Context->OMSetBlendState(Fill->BlendState, NULL, 0xffffffff);
-		DIRECTX.Context->PSSetShaderResources(0, 1, &Fill->Tex->TexSv);
+        ID3D11ShaderResourceView* texSrvs[] = { Fill->Tex->TexSv };
+		DIRECTX.Context->PSSetShaderResources(0, std::distance(std::begin(texSrvs), std::end(texSrvs)), texSrvs);
 		DIRECTX.Context->DrawIndexed((UINT)NumIndices, 0, 0);
 	}
 };
