@@ -86,16 +86,6 @@ struct DepthBuffer {
     }
 };
 
-struct DataBuffer {
-    ID3D11BufferPtr D3DBuffer;
-
-    DataBuffer(ID3D11Device* Device, D3D11_BIND_FLAG use, const void* buffer, size_t size) {
-        CD3D11_BUFFER_DESC desc(size, use, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-        D3D11_SUBRESOURCE_DATA sr{buffer, 0, 0};
-        Device->CreateBuffer(&desc, buffer ? &sr : nullptr, &D3DBuffer);
-    }
-};
-
 struct DirectX11 {
     HWND Window = nullptr;
     bool Running = false;
@@ -105,13 +95,12 @@ struct DirectX11 {
     ID3D11DevicePtr Device;
     ID3D11DeviceContextPtr Context;
     IDXGISwapChainPtr SwapChain;
-    std::unique_ptr<DepthBuffer> MainDepthBuffer;
     ID3D11Texture2DPtr BackBuffer;
     ID3D11RenderTargetViewPtr BackBufferRT;
     // Fixed size buffer for shader constants, before copied into buffer
     static const int UNIFORM_DATA_SIZE = 2000;
     unsigned char UniformData[UNIFORM_DATA_SIZE];
-    std::unique_ptr<DataBuffer> UniformBufferGen;
+    ID3D11BufferPtr UniformBufferGen;
     HINSTANCE hInstance = nullptr;
 
     static LRESULT CALLBACK WindowProc(_In_ HWND hWnd, _In_ UINT Msg, _In_ WPARAM wParam,
@@ -220,15 +209,13 @@ struct DirectX11 {
         hr = Device->CreateRenderTargetView(BackBuffer, nullptr, &BackBufferRT);
         VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
 
-        // Main depth buffer
-        MainDepthBuffer = std::make_unique<DepthBuffer>(Device, ovrSizei{WinSizeW, WinSizeH});
         auto rts = {BackBufferRT.GetInterfacePtr()};
-        Context->OMSetRenderTargets(rts.size(), begin(rts), MainDepthBuffer->TexDsv);
+        Context->OMSetRenderTargets(rts.size(), begin(rts), nullptr);
 
         // Buffer for shader constants
-        UniformBufferGen = std::make_unique<DataBuffer>(Device, D3D11_BIND_CONSTANT_BUFFER, nullptr,
-                                                        UNIFORM_DATA_SIZE);
-        auto buffs = {UniformBufferGen->D3DBuffer.GetInterfacePtr()};
+        CD3D11_BUFFER_DESC uniformBufferDesc(UNIFORM_DATA_SIZE, D3D11_BIND_CONSTANT_BUFFER, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        Device->CreateBuffer(&uniformBufferDesc, nullptr, &UniformBufferGen);
+        auto buffs = {UniformBufferGen.GetInterfacePtr()};
         Context->VSSetConstantBuffers(0, buffs.size(), begin(buffs));
 
         // Set max frame latency to 1
@@ -527,20 +514,22 @@ struct Model {
     XMFLOAT3 Pos;
     XMFLOAT4 Rot;
     std::unique_ptr<Material> Fill;
-    std::unique_ptr<DataBuffer> VertexBuffer;
-    std::unique_ptr<DataBuffer> IndexBuffer;
-    int NumIndices;
+    ID3D11BufferPtr VertexBuffer;
+    ID3D11BufferPtr IndexBuffer;
+    std::size_t NumIndices;
 
     Model(const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material* argFill)
         : Pos(argPos),
           Rot(argRot),
           Fill(argFill),
-          NumIndices{static_cast<short>(t.Indices.size())} {
-        VertexBuffer =
-            std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_VERTEX_BUFFER,
-                                         t.Vertices.data(), t.Vertices.size() * sizeof(Vertex));
-        IndexBuffer = std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_INDEX_BUFFER,
-                                                   t.Indices.data(), NumIndices * sizeof(short));
+          NumIndices{t.Indices.size()} {
+        CD3D11_BUFFER_DESC vbDesc(t.Vertices.size() * sizeof(t.Vertices.back()), D3D11_BIND_VERTEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA vbData{ t.Vertices.data(), 0, 0 };
+        DIRECTX.Device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
+
+        CD3D11_BUFFER_DESC ibDesc(t.Indices.size() * sizeof(t.Indices.back()), D3D11_BIND_INDEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA ibData{ t.Indices.data(), 0, 0 };
+        DIRECTX.Device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
     }
 
     void Render(const XMMATRIX& projView) const {
@@ -551,13 +540,13 @@ struct Model {
         memcpy(DIRECTX.UniformData + 64, std::begin({1.0f, 1.0f, 1.0f, 1.0f}), 16);  // MasterCol
 
         D3D11_MAPPED_SUBRESOURCE map{};
-        DIRECTX.Context->Map(DIRECTX.UniformBufferGen->D3DBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0,
+        DIRECTX.Context->Map(DIRECTX.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0,
                              &map);
         memcpy(map.pData, &DIRECTX.UniformData, DIRECTX.UNIFORM_DATA_SIZE);
-        DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen->D3DBuffer, 0);
+        DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen, 0);
         DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
-        DIRECTX.Context->IASetIndexBuffer(IndexBuffer->D3DBuffer, DXGI_FORMAT_R16_UINT, 0);
-        auto vbs = {VertexBuffer->D3DBuffer.GetInterfacePtr()};
+        DIRECTX.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+        auto vbs = {VertexBuffer.GetInterfacePtr()};
         DIRECTX.Context->IASetVertexBuffers(0, vbs.size(), begin(vbs), std::begin({sizeof(Vertex)}),
                                             std::begin({UINT(0)}));
         DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
