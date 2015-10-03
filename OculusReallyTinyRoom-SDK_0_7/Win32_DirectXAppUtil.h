@@ -98,8 +98,7 @@ struct DirectX11 {
     ID3D11Texture2DPtr BackBuffer;
     ID3D11RenderTargetViewPtr BackBufferRT;
     // Fixed size buffer for shader constants, before copied into buffer
-    static const int UNIFORM_DATA_SIZE = 2000;
-    unsigned char UniformData[UNIFORM_DATA_SIZE];
+    std::uint8_t UniformData[1024];
     ID3D11BufferPtr UniformBufferGen;
     HINSTANCE hInstance = nullptr;
 
@@ -132,7 +131,7 @@ struct DirectX11 {
         }
     }
 
-    bool InitWindow(HINSTANCE hinst, LPCWSTR title) {
+    auto InitWindow(HINSTANCE hinst, LPCWSTR title) {
         hInstance = hinst;
         Running = true;
 
@@ -153,15 +152,15 @@ struct DirectX11 {
         return true;
     }
 
-    bool InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true) {
+    auto InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true) {
         WinSizeW = vpW;
         WinSizeH = vpH;
 
-        auto size = RECT{0, 0, vpW, vpH};
-        AdjustWindowRect(&size, WS_OVERLAPPEDWINDOW, false);
+        auto windowSize = RECT{0, 0, vpW, vpH};
+        AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
         const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
-        if (!SetWindowPos(Window, nullptr, 0, 0, size.right - size.left, size.bottom - size.top,
-                          flags))
+        if (!SetWindowPos(Window, nullptr, 0, 0, windowSize.right - windowSize.left,
+                          windowSize.bottom - windowSize.top, flags))
             return false;
 
         IDXGIFactoryPtr DXGIFactory;
@@ -210,13 +209,14 @@ struct DirectX11 {
         VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
 
         auto rts = {BackBufferRT.GetInterfacePtr()};
-        Context->OMSetRenderTargets(rts.size(), begin(rts), nullptr);
+        Context->OMSetRenderTargets(size(rts), begin(rts), nullptr);
 
         // Buffer for shader constants
-        CD3D11_BUFFER_DESC uniformBufferDesc(UNIFORM_DATA_SIZE, D3D11_BIND_CONSTANT_BUFFER, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+        CD3D11_BUFFER_DESC uniformBufferDesc(std::size(UniformData), D3D11_BIND_CONSTANT_BUFFER,
+                                             D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
         Device->CreateBuffer(&uniformBufferDesc, nullptr, &UniformBufferGen);
         auto buffs = {UniformBufferGen.GetInterfacePtr()};
-        Context->VSSetConstantBuffers(0, buffs.size(), begin(buffs));
+        Context->VSSetConstantBuffers(0, size(buffs), begin(buffs));
 
         // Set max frame latency to 1
         IDXGIDevice1Ptr DXGIDevice1;
@@ -224,10 +224,34 @@ struct DirectX11 {
         VALIDATE((hr == ERROR_SUCCESS), "QueryInterface failed");
         DXGIDevice1->SetMaximumFrameLatency(1);
 
+        // Set up render states
+        // Create and set rasterizer state
+        CD3D11_RASTERIZER_DESC rs{D3D11_DEFAULT};
+        rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
+        ID3D11RasterizerStatePtr rss;
+        Device->CreateRasterizerState(&rs, &rss);
+        Context->RSSetState(rss);
+
+        // Create and set depth stencil state
+        ID3D11DepthStencilStatePtr dss;
+        Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT}, &dss);
+        Context->OMSetDepthStencilState(dss, 0);
+
+        // Create and set blend state
+        CD3D11_BLEND_DESC bm{D3D11_DEFAULT};
+        bm.RenderTarget[0].BlendEnable = TRUE;
+        bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+        bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
+            D3D11_BLEND_INV_SRC_ALPHA;
+        ID3D11BlendStatePtr bs;
+        Device->CreateBlendState(&bm, &bs);
+        Context->OMSetBlendState(bs, nullptr, 0xffffffff);
+
         return true;
     }
 
-    void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget, DepthBuffer* depthbuffer) const {
+    void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget,
+                                 DepthBuffer* depthbuffer) const {
         Context->OMSetRenderTargets(1, &rendertarget, depthbuffer->TexDsv);
         Context->ClearRenderTargetView(rendertarget, std::begin({0.0f, 0.0f, 0.0f, 0.0f}));
         Context->ClearDepthStencilView(depthbuffer->TexDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
@@ -239,7 +263,7 @@ struct DirectX11 {
         Context->RSSetViewports(1, &D3Dvp);
     }
 
-    bool HandleMessages() const {
+    auto HandleMessages() const {
         MSG msg{};
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -266,101 +290,54 @@ static struct DirectX11 DIRECTX;
 struct Texture {
     ID3D11Texture2DPtr Tex;
     ID3D11ShaderResourceViewPtr TexSv;
-    ID3D11RenderTargetViewPtr TexRtv;
     int SizeW, SizeH, MipLevels;
 
-    enum { AUTO_WHITE = 1, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING, AUTO_GRID, AUTO_GRADE_256 };
-    Texture(int sizeW, int sizeH, bool rendertarget, int mipLevels = 1, int sampleCount = 1)
-        : SizeW{sizeW}, SizeH{sizeH}, MipLevels{mipLevels} {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH);
-        dsDesc.MipLevels = MipLevels;
-        dsDesc.SampleDesc.Count = sampleCount;
-        if (rendertarget) dsDesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
+    enum { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING, AUTO_GRID, AUTO_GRADE_256 };
+    Texture(int autoFillData) : SizeW{256}, SizeH{256}, MipLevels{8} {
+        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH, 1, MipLevels,
+                                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+        dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
         DIRECTX.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
         DIRECTX.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
-        if (rendertarget) DIRECTX.Device->CreateRenderTargetView(Tex, nullptr, &TexRtv);
-    }
 
-    Texture(bool rendertarget, int sizeW, int sizeH, int autoFillData = 0, int sampleCount = 1)
-        : Texture{sizeW, sizeH, rendertarget, autoFillData ? 8 : 1, sampleCount} {
-        if (autoFillData) AutoFillTexture(autoFillData);
-    }
-
-    void FillTexture(DWORD* pix) const {
-        // Make local ones, because will be reducing them
-        auto sizeW = SizeW;
-        auto sizeH = SizeH;
-        for (int level = 0; level < MipLevels; ++level) {
-            DIRECTX.Context->UpdateSubresource(Tex, level, nullptr, pix, sizeW * 4, sizeH * 4);
-
-            for (int j = 0; j < (sizeH & ~1); j += 2) {
-                auto psrc = reinterpret_cast<std::uint8_t*>(pix) + (sizeW * j * 4);
-                auto pdest = reinterpret_cast<std::uint8_t*>(pix) + (sizeW * j);
-                for (int i = 0; i<sizeW>> 1; i++, psrc += 8, pdest += 4) {
-                    pdest[0] =
-                        (((int)psrc[0]) + psrc[4] + psrc[sizeW * 4 + 0] + psrc[sizeW * 4 + 4]) >> 2;
-                    pdest[1] =
-                        (((int)psrc[1]) + psrc[5] + psrc[sizeW * 4 + 1] + psrc[sizeW * 4 + 5]) >> 2;
-                    pdest[2] =
-                        (((int)psrc[2]) + psrc[6] + psrc[sizeW * 4 + 2] + psrc[sizeW * 4 + 6]) >> 2;
-                    pdest[3] =
-                        (((int)psrc[3]) + psrc[7] + psrc[sizeW * 4 + 3] + psrc[sizeW * 4 + 7]) >> 2;
-                }
-            }
-            sizeW >>= 1;
-            sizeH >>= 1;
-        }
-    }
-
-    static void ConvertToSRGB(DWORD* linear) {
-        DWORD drgb[3];
-        for (int k = 0; k < 3; k++) {
-            float rgb = ((float)((*linear >> (k * 8)) & 0xff)) / 255.0f;
-            rgb = pow(rgb, 2.2f);
-            drgb[k] = (DWORD)(rgb * 255.0f);
-        }
-        *linear = (*linear & 0xff000000) + (drgb[2] << 16) + (drgb[1] << 8) + (drgb[0] << 0);
-    }
-
-    void AutoFillTexture(int autoFillData) const {
+        // Fill texture with requested pattern
         std::vector<DWORD> pix(SizeW * SizeH);
         for (int j = 0; j < SizeH; ++j)
             for (int i = 0; i < SizeW; ++i) {
                 auto& curr = pix[j * SizeW + i];
                 switch (autoFillData) {
-                    case (AUTO_WALL):
-                        curr = (((j / 4 & 15) == 0) ||
-                                (((i / 4 & 15) == 0) &&
-                                 ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
-                                   ? 0xff3c3c3c
-                                   : 0xffb4b4b4;
-                        break;
-                    case (AUTO_FLOOR):
-                        curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
-                        break;
-                    case (AUTO_CEILING):
-                        curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
-                        break;
-                    case (AUTO_WHITE):
-                        curr = 0xffffffff;
-                        break;
-                    case (AUTO_GRADE_256):
-                        curr = 0xff000000 + i * 0x010101;
-                        break;
-                    case (AUTO_GRID):
-                        curr = (i < 4) || (i > (SizeW - 5)) || (j < 4) || (j > (SizeH - 5))
-                                   ? 0xffffffff
-                                   : 0xff000000;
-                        break;
-                    default:
-                        curr = 0xffffffff;
-                        break;
+                case (AUTO_WALL) :
+                    curr = (((j / 4 & 15) == 0) ||
+                        (((i / 4 & 15) == 0) &&
+                            ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
+                    ? 0xff3c3c3c
+                    : 0xffb4b4b4;
+                    break;
+                case (AUTO_FLOOR) :
+                    curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
+                    break;
+                case (AUTO_CEILING) :
+                    curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
+                    break;
+                case (AUTO_WHITE) :
+                    curr = 0xffffffff;
+                    break;
+                case (AUTO_GRADE_256) :
+                    curr = 0xff000000 + i * 0x010101;
+                    break;
+                case (AUTO_GRID) :
+                    curr = (i < 4) || (i >(SizeW - 5)) || (j < 4) || (j >(SizeH - 5))
+                    ? 0xffffffff
+                    : 0xff000000;
+                    break;
+                default:
+                    curr = 0xffffffff;
+                    break;
                 }
-                /// ConvertToSRGB(curr); //Require format for SDK - I've been recommended to remove
-                /// for now.
             }
-        FillTexture(pix.data());
+        DIRECTX.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
+        DIRECTX.Context->GenerateMips(TexSv);
     }
 };
 
@@ -370,9 +347,6 @@ struct Material {
     std::unique_ptr<Texture> Tex;
     ID3D11InputLayoutPtr InputLayout;
     ID3D11SamplerStatePtr SamplerState;
-    ID3D11RasterizerStatePtr Rasterizer;
-    ID3D11DepthStencilStatePtr DepthState;
-    ID3D11BlendStatePtr BlendState;
 
     Material(Texture* t) : Tex(t) {
         D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
@@ -385,23 +359,22 @@ struct Material {
 
         // Create vertex shader
         auto defaultVertexShaderSrc =
-            "float4x4 ProjView;  float4 MasterCol;"
+            "float4x4 ProjView;"
             "void main(in  float4 Position  : POSITION,    in  float4 Color : COLOR0, in  float2 "
             "TexCoord  : TEXCOORD0,"
             "          out float4 oPosition : SV_Position, out float4 oColor: COLOR0, out float2 "
             "oTexCoord : TEXCOORD0)"
             "{   oPosition = mul(ProjView, Position); oTexCoord = TexCoord; "
-            "    oColor = MasterCol * Color; }";
+            "    oColor = Color; }";
         D3DCompile(defaultVertexShaderSrc, strlen(defaultVertexShaderSrc), nullptr, nullptr,
                    nullptr, "main", "vs_4_0", 0, 0, &blobData, nullptr);
         DIRECTX.Device->CreateVertexShader(blobData->GetBufferPointer(), blobData->GetBufferSize(),
                                            nullptr, &D3DVert);
 
         // Create input layout
-        DIRECTX.Device->CreateInputLayout(
-            defaultVertexDesc,
-            std::distance(std::begin(defaultVertexDesc), std::end(defaultVertexDesc)),
-            blobData->GetBufferPointer(), blobData->GetBufferSize(), &InputLayout);
+        DIRECTX.Device->CreateInputLayout(defaultVertexDesc, std::size(defaultVertexDesc),
+                                          blobData->GetBufferPointer(), blobData->GetBufferSize(),
+                                          &InputLayout);
 
         // Create pixel shader
         auto defaultPixelShaderSrc =
@@ -423,23 +396,6 @@ struct Material {
         ss.MaxAnisotropy = 8;
         ss.MaxLOD = 15;
         DIRECTX.Device->CreateSamplerState(&ss, &SamplerState);
-
-        // Create rasterizer state
-        CD3D11_RASTERIZER_DESC rs{D3D11_DEFAULT};
-        rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
-        DIRECTX.Device->CreateRasterizerState(&rs, &Rasterizer);
-
-        // Create depth state
-        DIRECTX.Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT},
-                                                &DepthState);
-
-        // Create blend state
-        CD3D11_BLEND_DESC bm{D3D11_DEFAULT};
-        bm.RenderTarget[0].BlendEnable = TRUE;
-        bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
-        bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
-            D3D11_BLEND_INV_SRC_ALPHA;
-        DIRECTX.Device->CreateBlendState(&bm, &BlendState);
     }
 };
 
@@ -453,20 +409,20 @@ struct TriangleSet {
     std::vector<Vertex> Vertices;
     std::vector<short> Indices;
 
-    void AddQuad(Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
-        auto AddTriangle = [this](const std::initializer_list<Vertex>& vs) {
-            for (const auto& v : vs) {
-                Indices.push_back(static_cast<short>(Vertices.size()));
-                Vertices.push_back(v);
-            }
+    void AddSolidColorBox(float x1, float y1, float z1, float x2, float y2, float z2, DWORD c) {
+        auto AddQuad = [this](Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
+            auto AddTriangle = [this](const std::initializer_list<Vertex>& vs) {
+                for (const auto& v : vs) {
+                    Indices.push_back(static_cast<short>(size(Vertices)));
+                    Vertices.push_back(v);
+                }
+            };
+
+            AddTriangle({v0, v1, v2});
+            AddTriangle({v3, v2, v1});
         };
 
-        AddTriangle({v0, v1, v2});
-        AddTriangle({v3, v2, v1});
-    }
-
-    void AddSolidColorBox(float x1, float y1, float z1, float x2, float y2, float z2, DWORD c) {
-        const auto ModifyColor = [](DWORD c, XMFLOAT3 pos) {
+        auto ModifyColor = [](DWORD c, XMFLOAT3 pos) {
             const auto v = XMLoadFloat3(&pos);
             auto length = [](const auto& v) { return XMVectorGetX(XMVector3Length(v)); };
             const auto dist1 = length(XMVectorAdd(v, XMVectorSet(2.0f, -4.0f, 2.0f, 0.0f)));
@@ -519,49 +475,44 @@ struct Model {
     std::size_t NumIndices;
 
     Model(const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material* argFill)
-        : Pos(argPos),
-          Rot(argRot),
-          Fill(argFill),
-          NumIndices{t.Indices.size()} {
-        CD3D11_BUFFER_DESC vbDesc(t.Vertices.size() * sizeof(t.Vertices.back()), D3D11_BIND_VERTEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA vbData{ t.Vertices.data(), 0, 0 };
+        : Pos(argPos), Rot(argRot), Fill(argFill), NumIndices{size(t.Indices)} {
+        CD3D11_BUFFER_DESC vbDesc(size(t.Vertices) * sizeof(t.Vertices.back()),
+                                  D3D11_BIND_VERTEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA vbData{t.Vertices.data(), 0, 0};
         DIRECTX.Device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
 
-        CD3D11_BUFFER_DESC ibDesc(t.Indices.size() * sizeof(t.Indices.back()), D3D11_BIND_INDEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA ibData{ t.Indices.data(), 0, 0 };
+        CD3D11_BUFFER_DESC ibDesc(size(t.Indices) * sizeof(t.Indices.back()),
+                                  D3D11_BIND_INDEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA ibData{t.Indices.data(), 0, 0};
         DIRECTX.Device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
     }
 
     void Render(const XMMATRIX& projView) const {
-        auto modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
-                                         XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
-        auto mat = XMMatrixMultiply(modelMat, projView);
-        memcpy(DIRECTX.UniformData + 0, &mat, 64);                                   // ProjView
-        memcpy(DIRECTX.UniformData + 64, std::begin({1.0f, 1.0f, 1.0f, 1.0f}), 16);  // MasterCol
+        const auto modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
+                                               XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
+        const auto mat = XMMatrixMultiply(modelMat, projView);
+        memcpy(DIRECTX.UniformData, &mat, sizeof(mat));  // ProjView
 
         D3D11_MAPPED_SUBRESOURCE map{};
-        DIRECTX.Context->Map(DIRECTX.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0,
-                             &map);
-        memcpy(map.pData, &DIRECTX.UniformData, DIRECTX.UNIFORM_DATA_SIZE);
+        DIRECTX.Context->Map(DIRECTX.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+        memcpy(map.pData, &DIRECTX.UniformData, std::size(DIRECTX.UniformData));
         DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen, 0);
+
         DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
         DIRECTX.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-        auto vbs = {VertexBuffer.GetInterfacePtr()};
-        DIRECTX.Context->IASetVertexBuffers(0, vbs.size(), begin(vbs), std::begin({sizeof(Vertex)}),
+        const auto vbs = {VertexBuffer.GetInterfacePtr()};
+        DIRECTX.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({sizeof(Vertex)}),
                                             std::begin({UINT(0)}));
         DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         DIRECTX.Context->VSSetShader(Fill->D3DVert, nullptr, 0);
         DIRECTX.Context->PSSetShader(Fill->D3DPix, nullptr, 0);
 
-        auto samplerStates = {Fill->SamplerState.GetInterfacePtr()};
-        DIRECTX.Context->PSSetSamplers(0, samplerStates.size(), begin(samplerStates));
-        DIRECTX.Context->RSSetState(Fill->Rasterizer);
-        DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
-        DIRECTX.Context->OMSetBlendState(Fill->BlendState, nullptr, 0xffffffff);
+        const auto samplerStates = {Fill->SamplerState.GetInterfacePtr()};
+        DIRECTX.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
 
-        auto texSrvs = {Fill->Tex->TexSv.GetInterfacePtr()};
-        DIRECTX.Context->PSSetShaderResources(0, texSrvs.size(), begin(texSrvs));
+        const auto texSrvs = {Fill->Tex->TexSv.GetInterfacePtr()};
+        DIRECTX.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
         DIRECTX.Context->DrawIndexed(NumIndices, 0, 0);
     }
 };
@@ -579,12 +530,12 @@ struct Scene {
         TriangleSet cube;
         cube.AddSolidColorBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
         Add(new Model(cube, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
+                      new Material(new Texture(Texture::AUTO_CEILING))));
 
         TriangleSet spareCube;
         spareCube.AddSolidColorBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
         Add(new Model(spareCube, {0, -10, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
+                      new Material(new Texture(Texture::AUTO_CEILING))));
 
         TriangleSet walls;
         walls.AddSolidColorBox(10.1f, 0.0f, 20.0f, 10.0f, 4.0f, -20.0f, 0xff808080);   // Left Wall
@@ -592,7 +543,7 @@ struct Scene {
         walls.AddSolidColorBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f,
                                0xff808080);  // Right Wall
         Add(new Model(walls, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(false, 256, 256, Texture::AUTO_WALL))));
+                      new Material(new Texture(Texture::AUTO_WALL))));
 
         TriangleSet floors;
         floors.AddSolidColorBox(10.0f, -0.1f, 20.0f, -10.0f, 0.0f, -20.1f,
@@ -600,13 +551,12 @@ struct Scene {
         floors.AddSolidColorBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f,
                                 0xff808080);  // Bottom floor
         Add(new Model(floors, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(false, 256, 256, Texture::AUTO_FLOOR))));  // Floors
+                      new Material(new Texture(Texture::AUTO_FLOOR))));  // Floors
 
         TriangleSet ceiling;
         ceiling.AddSolidColorBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
-        Add(new Model(
-            ceiling, {0, 0, 0}, {0, 0, 0, 1},
-            new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));  // Ceiling
+        Add(new Model(ceiling, {0, 0, 0}, {0, 0, 0, 1},
+                      new Material(new Texture(Texture::AUTO_CEILING))));  // Ceiling
 
         TriangleSet furniture;
         furniture.AddSolidColorBox(-9.5f, 0.75f, -3.0f, -10.1f, 2.5f, -3.1f,
@@ -646,8 +596,7 @@ struct Scene {
         for (float f = 3.0f; f <= 6.6f; f += 0.4f)
             furniture.AddSolidColorBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040);  // Posts
         Add(new Model(furniture, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(false, 256, 256,
-                                               Texture::AUTO_WHITE))));  // Fixtures & furniture
+                      new Material(new Texture(Texture::AUTO_WHITE))));  // Fixtures & furniture
     }
 };
 
