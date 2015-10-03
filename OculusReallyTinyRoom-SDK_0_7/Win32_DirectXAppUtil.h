@@ -25,6 +25,7 @@ limitations under the License.
 #include <cstdio>
 #include <iterator>
 #include <memory>
+#include <numeric>
 #include <vector>
 
 #include <comdef.h>
@@ -413,17 +414,13 @@ struct Material {
 
     enum { MAT_WRAP = 1, MAT_WIRE = 2, MAT_ZALWAYS = 4, MAT_NOCULL = 8, MAT_TRANS = 16 };
 
-    Material(Texture* t)
-        : Tex(t), VertexSize(24) {
+    Material(Texture* t) : Tex(t), VertexSize(24) {
         D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
             {"Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
 
-        const DWORD flags = MAT_WRAP | MAT_TRANS;
-
-        // Use defaults if no shaders specified
         const char* defaultVertexShaderSrc =
             "float4x4 ProjView;  float4 MasterCol;"
             "void main(in  float4 Position  : POSITION,    in  float4 Color : COLOR0, in  float2 "
@@ -460,82 +457,63 @@ struct Material {
                                           nullptr, &D3DPix);
 
         // Create sampler state
-        D3D11_SAMPLER_DESC ss;
-        memset(&ss, 0, sizeof(ss));
-        ss.AddressU = ss.AddressV = ss.AddressW =
-            flags & MAT_WRAP ? D3D11_TEXTURE_ADDRESS_WRAP : D3D11_TEXTURE_ADDRESS_BORDER;
+        CD3D11_SAMPLER_DESC ss{D3D11_DEFAULT};
         ss.Filter = D3D11_FILTER_ANISOTROPIC;
+        ss.AddressU = ss.AddressV = ss.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
         ss.MaxAnisotropy = 8;
         ss.MaxLOD = 15;
         DIRECTX.Device->CreateSamplerState(&ss, &SamplerState);
 
-        // Create rasterizer
-        D3D11_RASTERIZER_DESC rs;
-        memset(&rs, 0, sizeof(rs));
-        rs.AntialiasedLineEnable = rs.DepthClipEnable = true;
-        rs.CullMode = flags & MAT_NOCULL ? D3D11_CULL_NONE : D3D11_CULL_BACK;
-        rs.FillMode = flags & MAT_WIRE ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
+        // Create rasterizer state
+        CD3D11_RASTERIZER_DESC rs{D3D11_DEFAULT};
+        rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
         DIRECTX.Device->CreateRasterizerState(&rs, &Rasterizer);
 
         // Create depth state
-        D3D11_DEPTH_STENCIL_DESC dss;
-        memset(&dss, 0, sizeof(dss));
-        dss.DepthEnable = true;
-        dss.DepthFunc = flags & MAT_ZALWAYS ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_LESS;
-        dss.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        CD3D11_DEPTH_STENCIL_DESC dss{D3D11_DEFAULT};
         DIRECTX.Device->CreateDepthStencilState(&dss, &DepthState);
 
-        // Create blend state - trans or otherwise
-        D3D11_BLEND_DESC bm;
-        memset(&bm, 0, sizeof(bm));
-        bm.RenderTarget[0].BlendEnable = flags & MAT_TRANS ? true : false;
-        bm.RenderTarget[0].BlendOp = bm.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        // Create blend state
+        CD3D11_BLEND_DESC bm{D3D11_DEFAULT};
+        bm.RenderTarget[0].BlendEnable = TRUE;
         bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
         bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
             D3D11_BLEND_INV_SRC_ALPHA;
-        bm.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         DIRECTX.Device->CreateBlendState(&bm, &BlendState);
     }
 };
 
-//----------------------------------------------------------------------
-struct Vertex
-{
-	XMFLOAT3  Pos;
-	DWORD     C;
-	float     U, V;
-	Vertex() {};
-	Vertex(XMFLOAT3 pos, DWORD c, float u, float v) : Pos(pos), C(c), U(u), V(v) {};
+struct Vertex {
+    XMFLOAT3 Pos;
+    DWORD C;
+    float U, V;
+    Vertex() = default;
+    Vertex(XMFLOAT3 pos, DWORD c, float u, float v) : Pos(pos), C(c), U(u), V(v){};
 };
 
-//-----------------------------------------------------------------------
 struct TriangleSet
 {
-	int       numVertices, numIndices, maxBuffer;
-	Vertex    * Vertices;
-	short     * Indices;
-	TriangleSet(int maxTriangles = 2000) : maxBuffer(3 * maxTriangles)
-	{
-		numVertices = numIndices = 0;
-		Vertices = (Vertex *)_aligned_malloc(maxBuffer *sizeof(Vertex), 16);
-		Indices = (short *)  _aligned_malloc(maxBuffer *sizeof(short), 16);
-	}
-    ~TriangleSet()
-    {
-        _aligned_free(Vertices);
-        _aligned_free(Indices);
-    }
-	void AddQuad(Vertex v0, Vertex v1, Vertex v2, Vertex v3) { AddTriangle(v0, v1, v2);	AddTriangle(v3, v2, v1); }
-	void AddTriangle(Vertex v0, Vertex v1, Vertex v2)
-	{
-		VALIDATE(numVertices <= (maxBuffer - 3), "Insufficient triangle set");
-		for (int i = 0; i < 3; i++) Indices[numIndices++] = numVertices + i;
-		Vertices[numVertices++] = v0;
-		Vertices[numVertices++] = v1;
-		Vertices[numVertices++] = v2;
-	}
+    int numVertices = 0;
+    int numIndices = 0;
+    int maxBuffer = 0;
+    std::vector<Vertex> Vertices;
+    std::vector<short> Indices;
+    TriangleSet(int maxTriangles = 2000)
+        : maxBuffer(3 * maxTriangles), Vertices(maxBuffer), Indices(maxBuffer) {}
 
-	DWORD ModifyColor(DWORD c, XMFLOAT3 pos)
+    void AddQuad(Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
+        AddTriangle(v0, v1, v2);
+        AddTriangle(v3, v2, v1);
+    }
+
+    void AddTriangle(Vertex v0, Vertex v1, Vertex v2) {
+        VALIDATE(numVertices <= (Vertices.size() - 3), "Insufficient triangle set");
+        std::iota(begin(Indices) + numIndices, begin(Indices) + numIndices + 3, numVertices);
+        numIndices += 3;
+        for (const auto& v : {v0, v1, v2}) Vertices[numVertices++] = v;
+    }
+
+    DWORD ModifyColor(DWORD c, XMFLOAT3 pos)
 	{
 		#define GetLengthLocal(v)  (sqrt(v.x*v.x + v.y*v.y + v.z*v.z))
 		float dist1 = GetLengthLocal(XMFLOAT3(pos.x - (-2), pos.y - (4), pos.z - (-2)));
