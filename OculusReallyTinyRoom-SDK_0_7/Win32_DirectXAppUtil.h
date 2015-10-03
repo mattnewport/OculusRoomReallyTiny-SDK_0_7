@@ -35,6 +35,8 @@ limitations under the License.
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
 
+#include <OVR_CAPI_D3D.h>
+
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -42,7 +44,11 @@ limitations under the License.
 using namespace DirectX;
 
 #ifndef VALIDATE
-    #define VALIDATE(x, msg) if (!(x)) { MessageBoxA(NULL, (msg), "OculusRoomTiny", MB_ICONERROR | MB_OK); exit(-1); }
+#define VALIDATE(x, msg)                                                  \
+    if (!(x)) {                                                           \
+        MessageBoxA(NULL, (msg), "OculusRoomTiny", MB_ICONERROR | MB_OK); \
+        exit(-1);                                                         \
+    }
 #endif
 
 #define COM_SMARTPTR_TYPEDEF(x) _COM_SMARTPTR_TYPEDEF(x, __uuidof(x))
@@ -69,31 +75,21 @@ COM_SMARTPTR_TYPEDEF(IDXGISwapChain);
 struct DepthBuffer {
     ID3D11DepthStencilViewPtr TexDsv;
 
-    DepthBuffer(ID3D11Device* Device, int sizeW, int sizeH, int sampleCount = 1) {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, sizeW, sizeH);
+    DepthBuffer(ID3D11Device* Device, ovrSizei size) {
+        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h);
         dsDesc.MipLevels = 1;
         dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        dsDesc.SampleDesc.Count = sampleCount;
+        dsDesc.SampleDesc.Count = 1;
         ID3D11Texture2DPtr Tex;
         Device->CreateTexture2D(&dsDesc, NULL, &Tex);
         Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
     }
 };
 
-// clean up member COM pointers
-template<typename T> void Release(T *&obj)
-{
-    if (!obj) return;
-    obj->Release();
-    obj = nullptr;
-}
-
 struct DataBuffer {
     ID3D11BufferPtr D3DBuffer;
-    size_t Size;
 
-    DataBuffer(ID3D11Device* Device, D3D11_BIND_FLAG use, const void* buffer, size_t size)
-        : Size(size) {
+    DataBuffer(ID3D11Device* Device, D3D11_BIND_FLAG use, const void* buffer, size_t size) {
         CD3D11_BUFFER_DESC desc(size, use, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
         D3D11_SUBRESOURCE_DATA sr{buffer, 0, 0};
         Device->CreateBuffer(&desc, buffer ? &sr : nullptr, &D3DBuffer);
@@ -141,7 +137,10 @@ struct DirectX11 {
     }
 
     ~DirectX11() {
-        CloseWindow();
+        if (Window) {
+            DestroyWindow(Window);
+            UnregisterClassW(L"App", hInstance);
+        }
     }
 
     bool InitWindow(HINSTANCE hinst, LPCWSTR title) {
@@ -165,19 +164,11 @@ struct DirectX11 {
         return true;
     }
 
-    void CloseWindow() {
-        if (Window) {
-            DestroyWindow(Window);
-            Window = nullptr;
-            UnregisterClassW(L"App", hInstance);
-        }
-    }
-
     bool InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true) {
         WinSizeW = vpW;
         WinSizeH = vpH;
 
-        RECT size = {0, 0, vpW, vpH};
+        auto size = RECT{0, 0, vpW, vpH};
         AdjustWindowRect(&size, WS_OVERLAPPEDWINDOW, false);
         const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
         if (!SetWindowPos(Window, nullptr, 0, 0, size.right - size.left, size.bottom - size.top,
@@ -185,8 +176,7 @@ struct DirectX11 {
             return false;
 
         IDXGIFactoryPtr DXGIFactory;
-        HRESULT hr =
-            CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
+        auto hr = CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
         VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
 
         IDXGIAdapterPtr Adapter;
@@ -231,7 +221,7 @@ struct DirectX11 {
         VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
 
         // Main depth buffer
-        MainDepthBuffer = std::make_unique<DepthBuffer>(Device, WinSizeW, WinSizeH);
+        MainDepthBuffer = std::make_unique<DepthBuffer>(Device, ovrSizei{WinSizeW, WinSizeH});
         auto rts = {BackBufferRT.GetInterfacePtr()};
         Context->OMSetRenderTargets(rts.size(), begin(rts), MainDepthBuffer->TexDsv);
 
@@ -250,20 +240,19 @@ struct DirectX11 {
         return true;
     }
 
-    void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget, DepthBuffer* depthbuffer) {
-        float black[] = {0.0f, 0.0f, 0.0f, 0.0f};
+    void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget, DepthBuffer* depthbuffer) const {
         Context->OMSetRenderTargets(1, &rendertarget, depthbuffer->TexDsv);
-        Context->ClearRenderTargetView(rendertarget, black);
+        Context->ClearRenderTargetView(rendertarget, std::begin({0.0f, 0.0f, 0.0f, 0.0f}));
         Context->ClearDepthStencilView(depthbuffer->TexDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
                                        1, 0);
     }
 
-    void SetViewport(float vpX, float vpY, float vpW, float vpH) {
+    void SetViewport(float vpX, float vpY, float vpW, float vpH) const {
         D3D11_VIEWPORT D3Dvp{vpX, vpY, vpW, vpH, 0.0f, 1.0f};
         Context->RSSetViewports(1, &D3Dvp);
     }
 
-    bool HandleMessages() {
+    bool HandleMessages() const {
         MSG msg{};
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -272,7 +261,7 @@ struct DirectX11 {
         return Running;
     }
 
-    void Run(bool (*MainLoop)(bool retryCreate)) {
+    void Run(bool (*MainLoop)(bool retryCreate)) const {
         // false => just fail on any error
         VALIDATE(MainLoop(false), "Oculus Rift not detected.");
         while (HandleMessages()) {
@@ -287,8 +276,7 @@ struct DirectX11 {
 // global DX11 state
 static struct DirectX11 DIRECTX;
 
-struct Texture
-{
+struct Texture {
     ID3D11Texture2DPtr Tex;
     ID3D11ShaderResourceViewPtr TexSv;
     ID3D11RenderTargetViewPtr TexRtv;
@@ -312,10 +300,10 @@ struct Texture
         if (autoFillData) AutoFillTexture(autoFillData);
     }
 
-    void FillTexture(DWORD* pix) {
+    void FillTexture(DWORD* pix) const {
         // Make local ones, because will be reducing them
-        int sizeW = SizeW;
-        int sizeH = SizeH;
+        auto sizeW = SizeW;
+        auto sizeH = SizeH;
         for (int level = 0; level < MipLevels; ++level) {
             DIRECTX.Context->UpdateSubresource(Tex, level, nullptr, pix, sizeW * 4, sizeH * 4);
 
@@ -348,38 +336,38 @@ struct Texture
         *linear = (*linear & 0xff000000) + (drgb[2] << 16) + (drgb[1] << 8) + (drgb[0] << 0);
     }
 
-    void AutoFillTexture(int autoFillData) {
+    void AutoFillTexture(int autoFillData) const {
         std::vector<DWORD> pix(SizeW * SizeH);
-        for (int j = 0; j < SizeH; j++)
-            for (int i = 0; i < SizeW; i++) {
-                DWORD* curr = &pix[j * SizeW + i];
+        for (int j = 0; j < SizeH; ++j)
+            for (int i = 0; i < SizeW; ++i) {
+                auto& curr = pix[j * SizeW + i];
                 switch (autoFillData) {
                     case (AUTO_WALL):
-                        *curr = (((j / 4 & 15) == 0) ||
-                                 (((i / 4 & 15) == 0) &&
-                                  ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
-                                    ? 0xff3c3c3c
-                                    : 0xffb4b4b4;
+                        curr = (((j / 4 & 15) == 0) ||
+                                (((i / 4 & 15) == 0) &&
+                                 ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
+                                   ? 0xff3c3c3c
+                                   : 0xffb4b4b4;
                         break;
                     case (AUTO_FLOOR):
-                        *curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
+                        curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
                         break;
                     case (AUTO_CEILING):
-                        *curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
+                        curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
                         break;
                     case (AUTO_WHITE):
-                        *curr = 0xffffffff;
+                        curr = 0xffffffff;
                         break;
                     case (AUTO_GRADE_256):
-                        *curr = 0xff000000 + i * 0x010101;
+                        curr = 0xff000000 + i * 0x010101;
                         break;
                     case (AUTO_GRID):
-                        *curr = (i < 4) || (i > (SizeW - 5)) || (j < 4) || (j > (SizeH - 5))
-                                    ? 0xffffffff
-                                    : 0xff000000;
+                        curr = (i < 4) || (i > (SizeW - 5)) || (j < 4) || (j > (SizeH - 5))
+                                   ? 0xffffffff
+                                   : 0xff000000;
                         break;
                     default:
-                        *curr = 0xffffffff;
+                        curr = 0xffffffff;
                         break;
                 }
                 /// ConvertToSRGB(curr); //Require format for SDK - I've been recommended to remove
@@ -406,7 +394,10 @@ struct Material {
             {"TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
 
-        const char* defaultVertexShaderSrc =
+        ID3DBlobPtr blobData;
+
+        // Create vertex shader
+        auto defaultVertexShaderSrc =
             "float4x4 ProjView;  float4 MasterCol;"
             "void main(in  float4 Position  : POSITION,    in  float4 Color : COLOR0, in  float2 "
             "TexCoord  : TEXCOORD0,"
@@ -414,16 +405,6 @@ struct Material {
             "oTexCoord : TEXCOORD0)"
             "{   oPosition = mul(ProjView, Position); oTexCoord = TexCoord; "
             "    oColor = MasterCol * Color; }";
-        const char* defaultPixelShaderSrc =
-            "Texture2D Texture   : register(t0); SamplerState Linear : register(s0); "
-            "float4 main(in float4 Position : SV_Position, in float4 Color: COLOR0, in float2 "
-            "TexCoord : TEXCOORD0) : SV_Target"
-            "{   float4 TexCol = Texture.Sample(Linear, TexCoord); "
-            "    if (TexCol.a==0) clip(-1); "  // If alpha = 0, don't draw
-            "    return(Color * TexCol); }";
-
-        // Create vertex shader
-        ID3DBlobPtr blobData;
         D3DCompile(defaultVertexShaderSrc, strlen(defaultVertexShaderSrc), nullptr, nullptr,
                    nullptr, "main", "vs_4_0", 0, 0, &blobData, nullptr);
         DIRECTX.Device->CreateVertexShader(blobData->GetBufferPointer(), blobData->GetBufferSize(),
@@ -436,6 +417,13 @@ struct Material {
             blobData->GetBufferPointer(), blobData->GetBufferSize(), &InputLayout);
 
         // Create pixel shader
+        auto defaultPixelShaderSrc =
+            "Texture2D Texture   : register(t0); SamplerState Linear : register(s0); "
+            "float4 main(in float4 Position : SV_Position, in float4 Color: COLOR0, in float2 "
+            "TexCoord : TEXCOORD0) : SV_Target"
+            "{   float4 TexCol = Texture.Sample(Linear, TexCoord); "
+            "    if (TexCol.a==0) clip(-1); "  // If alpha = 0, don't draw
+            "    return(Color * TexCol); }";
         D3DCompile(defaultPixelShaderSrc, strlen(defaultPixelShaderSrc), nullptr, nullptr, nullptr,
                    "main", "ps_4_0", 0, 0, &blobData, nullptr);
         DIRECTX.Device->CreatePixelShader(blobData->GetBufferPointer(), blobData->GetBufferSize(),
@@ -455,8 +443,8 @@ struct Material {
         DIRECTX.Device->CreateRasterizerState(&rs, &Rasterizer);
 
         // Create depth state
-        CD3D11_DEPTH_STENCIL_DESC dss{D3D11_DEFAULT};
-        DIRECTX.Device->CreateDepthStencilState(&dss, &DepthState);
+        DIRECTX.Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT},
+                                                &DepthState);
 
         // Create blend state
         CD3D11_BLEND_DESC bm{D3D11_DEFAULT};
@@ -472,8 +460,6 @@ struct Vertex {
     XMFLOAT3 Pos;
     DWORD C;
     float U, V;
-    Vertex() = default;
-    Vertex(XMFLOAT3 pos, DWORD c, float u, float v) : Pos(pos), C(c), U(u), V(v){};
 };
 
 struct TriangleSet {
@@ -545,23 +531,25 @@ struct Model {
     std::unique_ptr<DataBuffer> IndexBuffer;
     int NumIndices;
 
-    Model(TriangleSet* t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material* argFill)
-        : Pos(argPos), Rot(argRot), Fill(argFill), NumIndices{static_cast<short>(t->Indices.size())} {
+    Model(const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot, Material* argFill)
+        : Pos(argPos),
+          Rot(argRot),
+          Fill(argFill),
+          NumIndices{static_cast<short>(t.Indices.size())} {
         VertexBuffer =
-            std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_VERTEX_BUFFER, t->Vertices.data(),
-                                         t->Vertices.size() * sizeof(Vertex));
+            std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_VERTEX_BUFFER,
+                                         t.Vertices.data(), t.Vertices.size() * sizeof(Vertex));
         IndexBuffer = std::make_unique<DataBuffer>(DIRECTX.Device, D3D11_BIND_INDEX_BUFFER,
-                                                   t->Indices.data(), NumIndices * sizeof(short));
+                                                   t.Indices.data(), NumIndices * sizeof(short));
     }
 
-    void Render(XMMATRIX* projView, float R, float G, float B, float A, bool standardUniforms) {
-        XMMATRIX modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
-                                             XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
-        XMMATRIX mat = XMMatrixMultiply(modelMat, *projView);
-        float col[] = {R, G, B, A};
-        if (standardUniforms) memcpy(DIRECTX.UniformData + 0, &mat, 64);   // ProjView
-        if (standardUniforms) memcpy(DIRECTX.UniformData + 64, &col, 16);  // MasterCol
-        
+    void Render(const XMMATRIX& projView) const {
+        auto modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
+                                         XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
+        auto mat = XMMatrixMultiply(modelMat, projView);
+        memcpy(DIRECTX.UniformData + 0, &mat, 64);                                   // ProjView
+        memcpy(DIRECTX.UniformData + 64, std::begin({1.0f, 1.0f, 1.0f, 1.0f}), 16);  // MasterCol
+
         D3D11_MAPPED_SUBRESOURCE map{};
         DIRECTX.Context->Map(DIRECTX.UniformBufferGen->D3DBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0,
                              &map);
@@ -569,10 +557,9 @@ struct Model {
         DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen->D3DBuffer, 0);
         DIRECTX.Context->IASetInputLayout(Fill->InputLayout);
         DIRECTX.Context->IASetIndexBuffer(IndexBuffer->D3DBuffer, DXGI_FORMAT_R16_UINT, 0);
-        const UINT offset = 0;
         auto vbs = {VertexBuffer->D3DBuffer.GetInterfacePtr()};
-        auto strides = {sizeof(Vertex)};
-        DIRECTX.Context->IASetVertexBuffers(0, vbs.size(), begin(vbs), begin(strides), &offset);
+        DIRECTX.Context->IASetVertexBuffers(0, vbs.size(), begin(vbs), std::begin({sizeof(Vertex)}),
+                                            std::begin({UINT(0)}));
         DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         DIRECTX.Context->VSSetShader(Fill->D3DVert, nullptr, 0);
@@ -582,7 +569,7 @@ struct Model {
         DIRECTX.Context->PSSetSamplers(0, samplerStates.size(), begin(samplerStates));
         DIRECTX.Context->RSSetState(Fill->Rasterizer);
         DIRECTX.Context->OMSetDepthStencilState(Fill->DepthState, 0);
-        DIRECTX.Context->OMSetBlendState(Fill->BlendState, NULL, 0xffffffff);
+        DIRECTX.Context->OMSetBlendState(Fill->BlendState, nullptr, 0xffffffff);
 
         auto texSrvs = {Fill->Tex->TexSv.GetInterfacePtr()};
         DIRECTX.Context->PSSetShaderResources(0, texSrvs.size(), begin(texSrvs));
@@ -595,19 +582,19 @@ struct Scene {
 
     void Add(Model* n) { Models.emplace_back(n); }
 
-    void Render(XMMATRIX* projView, float R, float G, float B, float A, bool standardUniforms) {
-        for (const auto& model : Models) model->Render(projView, R, G, B, A, standardUniforms);
+    void Render(const XMMATRIX& projView) const {
+        for (const auto& model : Models) model->Render(projView);
     }
 
     Scene() {
         TriangleSet cube;
         cube.AddSolidColorBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
-        Add(new Model(&cube, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+        Add(new Model(cube, {0, 0, 0}, {0, 0, 0, 1},
                       new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
 
         TriangleSet spareCube;
         spareCube.AddSolidColorBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
-        Add(new Model(&spareCube, XMFLOAT3(0, -10, 0), XMFLOAT4(0, 0, 0, 1),
+        Add(new Model(spareCube, {0, -10, 0}, {0, 0, 0, 1},
                       new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));
 
         TriangleSet walls;
@@ -615,7 +602,7 @@ struct Scene {
         walls.AddSolidColorBox(10.0f, -0.1f, 20.1f, -10.0f, 4.0f, 20.0f, 0xff808080);  // Back Wall
         walls.AddSolidColorBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f,
                                0xff808080);  // Right Wall
-        Add(new Model(&walls, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+        Add(new Model(walls, {0, 0, 0}, {0, 0, 0, 1},
                       new Material(new Texture(false, 256, 256, Texture::AUTO_WALL))));
 
         TriangleSet floors;
@@ -623,13 +610,13 @@ struct Scene {
                                 0xff808080);  // Main floor
         floors.AddSolidColorBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f,
                                 0xff808080);  // Bottom floor
-        Add(new Model(&floors, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+        Add(new Model(floors, {0, 0, 0}, {0, 0, 0, 1},
                       new Material(new Texture(false, 256, 256, Texture::AUTO_FLOOR))));  // Floors
 
         TriangleSet ceiling;
         ceiling.AddSolidColorBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
         Add(new Model(
-            &ceiling, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+            ceiling, {0, 0, 0}, {0, 0, 0, 1},
             new Material(new Texture(false, 256, 256, Texture::AUTO_CEILING))));  // Ceiling
 
         TriangleSet furniture;
@@ -669,7 +656,7 @@ struct Scene {
                                    0xff202050);  // Chair Back high bar
         for (float f = 3.0f; f <= 6.6f; f += 0.4f)
             furniture.AddSolidColorBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040);  // Posts
-        Add(new Model(&furniture, XMFLOAT3(0, 0, 0), XMFLOAT4(0, 0, 0, 1),
+        Add(new Model(furniture, {0, 0, 0}, {0, 0, 0, 1},
                       new Material(new Texture(false, 256, 256,
                                                Texture::AUTO_WHITE))));  // Fixtures & furniture
     }
@@ -678,13 +665,11 @@ struct Scene {
 struct Camera {
     XMVECTOR Pos;
     XMVECTOR Rot;
-    Camera() = default;
-    Camera(XMVECTOR* pos, XMVECTOR* rot) : Pos(*pos), Rot(*rot){};
-    XMMATRIX GetViewMatrix() {
-        XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), Rot);
+    auto GetViewMatrix() const {
+        const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), Rot);
         return XMMatrixLookAtRH(Pos, XMVectorAdd(Pos, forward),
                                 XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Rot));
     }
 };
 
-#endif // OVR_Win32_DirectXAppUtil_h
+#endif  // OVR_Win32_DirectXAppUtil_h
