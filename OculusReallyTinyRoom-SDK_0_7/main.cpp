@@ -181,10 +181,8 @@ static bool MainLoop(bool retryCreate) {
                 DIRECTX.SetViewport(eyeRenderViewport[eye]);
 
                 // Get the pose information in XM format
-                const auto& ori = EyeRenderPose[eye].Orientation;
-                const auto eyeQuat = XMVectorSet(ori.x, ori.y, ori.z, ori.w);
-                const auto& pos = EyeRenderPose[eye].Position;
-                const auto eyePos = XMVectorSet(pos.x, pos.y, pos.z, 0);
+                const auto eyeQuat = XMLoadFloat4(&XMFLOAT4{&EyeRenderPose[eye].Orientation.x});
+                const auto eyePos = XMLoadFloat3(&XMFLOAT3{&EyeRenderPose[eye].Position.x});
 
                 // Get view and projection matrices for the Rift camera
                 const auto CombinedPos =
@@ -193,17 +191,15 @@ static bool MainLoop(bool retryCreate) {
                     Camera{CombinedPos, XMQuaternionMultiply(eyeQuat, mainCam.Rot)};
                 const auto p = ovrMatrix4f_Projection(eyeRenderDesc[eye].Fov, 0.2f, 1000.0f,
                                                       ovrProjection_RightHanded);
-                const auto xp = XMFLOAT4X4{&p.M[0][0]};
-                const auto proj = XMMatrixTranspose(XMLoadFloat4x4(&xp));
+                const auto proj = XMMatrixTranspose(XMLoadFloat4x4(&XMFLOAT4X4{&p.M[0][0]}));
+
+                // Render the scene
                 roomScene.Render(XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
             }
         }
 
         // Initialize our single full screen Fov layer.
-        auto ld = ovrLayerEyeFov{};
-        ld.Header.Type = ovrLayerType_EyeFov;
-        ld.Header.Flags = 0;
-
+        auto ld = ovrLayerEyeFov{{ovrLayerType_EyeFov, 0}};
         for (int eye = 0; eye < 2; ++eye) {
             ld.ColorTexture[eye] = EyeRenderTexture[eye].TextureSet.get();
             ld.Viewport[eye] = eyeRenderViewport[eye];
