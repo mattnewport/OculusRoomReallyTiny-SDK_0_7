@@ -27,6 +27,7 @@ limitations under the License.
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <type_traits>
 #include <vector>
 
 #include <comdef.h>
@@ -287,68 +288,75 @@ struct DirectX11 {
 // global DX11 state
 static struct DirectX11 DIRECTX;
 
-struct Texture {
+enum class TextureFill {
+    AUTO_WHITE,
+    AUTO_WALL,
+    AUTO_FLOOR,
+    AUTO_CEILING,
+    AUTO_GRID,
+    AUTO_GRADE_256
+};
+
+auto Texture(TextureFill texFill) {
+    const int SizeW{256}, SizeH{256}, MipLevels{8};
+    CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH, 1, MipLevels,
+                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+
     ID3D11Texture2DPtr Tex;
+    DIRECTX.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
     ID3D11ShaderResourceViewPtr TexSv;
-    int SizeW, SizeH, MipLevels;
+    DIRECTX.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
 
-    enum { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING, AUTO_GRID, AUTO_GRADE_256 };
-    Texture(int autoFillData) : SizeW{256}, SizeH{256}, MipLevels{8} {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH, 1, MipLevels,
-                                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
-        dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-
-        DIRECTX.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
-        DIRECTX.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
-
-        // Fill texture with requested pattern
-        std::vector<DWORD> pix(SizeW * SizeH);
-        for (int j = 0; j < SizeH; ++j)
-            for (int i = 0; i < SizeW; ++i) {
-                auto& curr = pix[j * SizeW + i];
-                switch (autoFillData) {
-                case (AUTO_WALL) :
+    // Fill texture with requested pattern
+    std::vector<DWORD> pix(SizeW * SizeH);
+    for (int j = 0; j < SizeH; ++j)
+        for (int i = 0; i < SizeW; ++i) {
+            auto& curr = pix[j * SizeW + i];
+            switch (texFill) {
+                case (TextureFill::AUTO_WALL):
                     curr = (((j / 4 & 15) == 0) ||
-                        (((i / 4 & 15) == 0) &&
-                            ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
-                    ? 0xff3c3c3c
-                    : 0xffb4b4b4;
+                            (((i / 4 & 15) == 0) &&
+                                ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
+                                ? 0xff3c3c3c
+                                : 0xffb4b4b4;
                     break;
-                case (AUTO_FLOOR) :
+                case (TextureFill::AUTO_FLOOR):
                     curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
                     break;
-                case (AUTO_CEILING) :
+                case (TextureFill::AUTO_CEILING):
                     curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
                     break;
-                case (AUTO_WHITE) :
+                case (TextureFill::AUTO_WHITE):
                     curr = 0xffffffff;
                     break;
-                case (AUTO_GRADE_256) :
+                case (TextureFill::AUTO_GRADE_256):
                     curr = 0xff000000 + i * 0x010101;
                     break;
-                case (AUTO_GRID) :
-                    curr = (i < 4) || (i >(SizeW - 5)) || (j < 4) || (j >(SizeH - 5))
-                    ? 0xffffffff
-                    : 0xff000000;
+                case (TextureFill::AUTO_GRID):
+                    curr = (i < 4) || (i > (SizeW - 5)) || (j < 4) || (j > (SizeH - 5))
+                                ? 0xffffffff
+                                : 0xff000000;
                     break;
                 default:
                     curr = 0xffffffff;
                     break;
-                }
             }
-        DIRECTX.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
-        DIRECTX.Context->GenerateMips(TexSv);
-    }
-};
+        }
+    DIRECTX.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
+    DIRECTX.Context->GenerateMips(TexSv);
+
+    return TexSv;
+}
 
 struct Material {
     ID3D11VertexShaderPtr D3DVert;
     ID3D11PixelShaderPtr D3DPix;
-    std::unique_ptr<Texture> Tex;
+    ID3D11ShaderResourceViewPtr Tex;
     ID3D11InputLayoutPtr InputLayout;
     ID3D11SamplerStatePtr SamplerState;
 
-    Material(Texture* t) : Tex(t) {
+    Material(ID3D11ShaderResourceView* t) : Tex{t} {
         D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
             {"Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
@@ -511,7 +519,7 @@ struct Model {
         const auto samplerStates = {Fill->SamplerState.GetInterfacePtr()};
         DIRECTX.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
 
-        const auto texSrvs = {Fill->Tex->TexSv.GetInterfacePtr()};
+        const auto texSrvs = {Fill->Tex.GetInterfacePtr()};
         DIRECTX.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
         DIRECTX.Context->DrawIndexed(NumIndices, 0, 0);
     }
@@ -530,12 +538,12 @@ struct Scene {
         TriangleSet cube;
         cube.AddSolidColorBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
         Add(new Model(cube, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_CEILING))));
+                      new Material(Texture(TextureFill::AUTO_CEILING))));
 
         TriangleSet spareCube;
         spareCube.AddSolidColorBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
         Add(new Model(spareCube, {0, -10, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_CEILING))));
+                      new Material(Texture(TextureFill::AUTO_CEILING))));
 
         TriangleSet walls;
         walls.AddSolidColorBox(10.1f, 0.0f, 20.0f, 10.0f, 4.0f, -20.0f, 0xff808080);   // Left Wall
@@ -543,7 +551,7 @@ struct Scene {
         walls.AddSolidColorBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f,
                                0xff808080);  // Right Wall
         Add(new Model(walls, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_WALL))));
+                      new Material(Texture(TextureFill::AUTO_WALL))));
 
         TriangleSet floors;
         floors.AddSolidColorBox(10.0f, -0.1f, 20.0f, -10.0f, 0.0f, -20.1f,
@@ -551,12 +559,12 @@ struct Scene {
         floors.AddSolidColorBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f,
                                 0xff808080);  // Bottom floor
         Add(new Model(floors, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_FLOOR))));  // Floors
+                      new Material(Texture(TextureFill::AUTO_FLOOR))));  // Floors
 
         TriangleSet ceiling;
         ceiling.AddSolidColorBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
         Add(new Model(ceiling, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_CEILING))));  // Ceiling
+                      new Material(Texture(TextureFill::AUTO_CEILING))));  // Ceiling
 
         TriangleSet furniture;
         furniture.AddSolidColorBox(-9.5f, 0.75f, -3.0f, -10.1f, 2.5f, -3.1f,
@@ -596,7 +604,7 @@ struct Scene {
         for (float f = 3.0f; f <= 6.6f; f += 0.4f)
             furniture.AddSolidColorBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040);  // Posts
         Add(new Model(furniture, {0, 0, 0}, {0, 0, 0, 1},
-                      new Material(new Texture(Texture::AUTO_WHITE))));  // Fixtures & furniture
+                      new Material(Texture(TextureFill::AUTO_WHITE))));  // Fixtures & furniture
     }
 };
 

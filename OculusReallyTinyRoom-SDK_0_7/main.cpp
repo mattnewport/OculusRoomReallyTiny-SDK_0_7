@@ -68,13 +68,13 @@ struct OculusTexture {
 static bool MainLoop(bool retryCreate) {
     auto result = ovrResult{};
     auto luid = ovrGraphicsLuid{};
-    auto HMD =
-        std::unique_ptr<ovrHmdStruct, decltype(&ovr_Destroy)>{[&result, &luid] {
-                                                                  ovrHmd HMD;
-                                                                  result = ovr_Create(&HMD, &luid);
-                                                                  return HMD;
-                                                              }(),
-                                                              ovr_Destroy};
+    auto HMD = std::unique_ptr<std::remove_pointer_t<ovrHmd>, decltype(&ovr_Destroy)>{
+        [&result, &luid] {
+            ovrHmd HMD;
+            result = ovr_Create(&HMD, &luid);
+            return HMD;
+        }(),
+        ovr_Destroy};
     if (!OVR_SUCCESS(result)) return retryCreate;
 
     auto hmdDesc = ovr_GetHmdDesc(HMD.get());
