@@ -29,34 +29,38 @@ limitations under the License.
 // Include the Oculus SDK
 #include <OVR_CAPI_D3D.h>
 
-//------------------------------------------------------------
-// ovrSwapTextureSet wrapper class that also maintains the render target views
-// needed for D3D11 rendering.
+// ovrSwapTextureSet wrapper class that also maintains the render target views needed for D3D11
+// rendering.
 struct OculusTexture {
-    ovrHmd hmd = nullptr;
-    ovrSwapTextureSet* TextureSet = nullptr;
+    std::unique_ptr<ovrSwapTextureSet, std::function<void(ovrSwapTextureSet*)>> TextureSet;
     ID3D11RenderTargetViewPtr TexRtv[2];
 
-    OculusTexture(ovrHmd hmd_, ovrSizei size) : hmd{hmd_} {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
-                                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    OculusTexture(ovrHmd hmd, ovrSizei size)
+        : TextureSet{[hmd, size, &texRtv = TexRtv] {
+                         // Create and validate the swap texture set and stash it in unique_ptr
+                         CD3D11_TEXTURE2D_DESC dsDesc(
+                             DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
+                             D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
 
-        auto result = ovr_CreateSwapTextureSetD3D11(hmd, DIRECTX.Device, &dsDesc,
-                                                    ovrSwapTextureSetD3D11_Typeless, &TextureSet);
-        VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
-
-        VALIDATE(TextureSet->TextureCount == 2, "TextureCount mismatch.");
-
-        for (int i = 0; i < TextureSet->TextureCount; ++i) {
-            auto tex = reinterpret_cast<ovrD3D11Texture*>(&TextureSet->Textures[i]);
-            CD3D11_RENDER_TARGET_VIEW_DESC rtvd(D3D11_RTV_DIMENSION_TEXTURE2D,
-                                                DXGI_FORMAT_R8G8B8A8_UNORM);
-            DIRECTX.Device->CreateRenderTargetView(tex->D3D11.pTexture, &rtvd, &TexRtv[i]);
-        }
-    }
-
-    ~OculusTexture() {
-        if (TextureSet) ovr_DestroySwapTextureSet(hmd, TextureSet);
+                         ovrSwapTextureSet* ts{};
+                         auto result = ovr_CreateSwapTextureSetD3D11(
+                             hmd, DIRECTX.Device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
+                         VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
+                         VALIDATE(ts->TextureCount == std::size(texRtv), "TextureCount mismatch.");
+                         return ts;
+                     }(),
+                     // unique_ptr Deleter lambda to clean up the swap texture set
+                     [hmd](ovrSwapTextureSet* ts) { ovr_DestroySwapTextureSet(hmd, ts); }} {
+        // Create render target views for each of the textures in the swap texture set
+        std::transform(TextureSet->Textures, TextureSet->Textures + TextureSet->TextureCount,
+                       TexRtv, [](auto tex) {
+                           CD3D11_RENDER_TARGET_VIEW_DESC rtvd(D3D11_RTV_DIMENSION_TEXTURE2D,
+                                                               DXGI_FORMAT_R8G8B8A8_UNORM);
+                           ID3D11RenderTargetViewPtr rtv;
+                           DIRECTX.Device->CreateRenderTargetView(
+                               reinterpret_cast<ovrD3D11Texture&>(tex).D3D11.pTexture, &rtvd, &rtv);
+                           return rtv;
+                       });
     }
 
     auto AdvanceToNextTexture() {
@@ -64,17 +68,25 @@ struct OculusTexture {
     }
 };
 
+// Helper to wrap ovr types like ovrHmd and ovrTexture* in a unique_ptr with custom create / destroy
+template <typename CreateFunc, typename DestroyFunc>
+auto create_unique(CreateFunc createFunc, DestroyFunc destroyFunc) {
+    return std::unique_ptr<std::remove_pointer_t<std::result_of_t<CreateFunc()>>, DestroyFunc>{
+        createFunc(), destroyFunc};
+}
+
 // return true to retry later (e.g. after display lost)
 static bool MainLoop(bool retryCreate) {
     auto result = ovrResult{};
     auto luid = ovrGraphicsLuid{};
-    auto HMD = std::unique_ptr<std::remove_pointer_t<ovrHmd>, decltype(&ovr_Destroy)>{
+    // Initialize the HMD, stash it in a unique_ptr for automatic cleanup.
+    auto HMD = create_unique(
         [&result, &luid] {
-            ovrHmd HMD;
+            ovrHmd HMD{};
             result = ovr_Create(&HMD, &luid);
             return HMD;
-        }(),
-        ovr_Destroy};
+        },
+        ovr_Destroy);
     if (!OVR_SUCCESS(result)) return retryCreate;
 
     auto hmdDesc = ovr_GetHmdDesc(HMD.get());
@@ -100,20 +112,19 @@ static bool MainLoop(bool retryCreate) {
                                     {DIRECTX.Device, idealSizes[1]}};
     ovrRecti eyeRenderViewport[] = {{{0, 0}, idealSizes[0]}, {{0, 0}, idealSizes[1]}};
 
-    // Create a mirror to see on the monitor.
-    auto destroyMirrorTexture = [hmd = HMD.get()](ovrTexture* mt) { ovr_DestroyMirrorTexture(hmd, mt); };
-    std::unique_ptr<ovrTexture, decltype(destroyMirrorTexture)> mirrorTexture{
-        [&result, hmd = HMD.get()] {
+    // Create a mirror to see on the monitor, stash it in a unique_ptr for automatic cleanup.
+    auto mirrorTexture =
+        create_unique([&result, hmd = HMD.get() ] {
             CD3D11_TEXTURE2D_DESC td(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DIRECTX.WinSizeW,
                                      DIRECTX.WinSizeH, 1, 1);
             ovrTexture* mirrorTexture{};
-            result =
-                ovr_CreateMirrorTextureD3D11(hmd, DIRECTX.Device, &td, 0, &mirrorTexture);
+            result = ovr_CreateMirrorTextureD3D11(hmd, DIRECTX.Device, &td, 0, &mirrorTexture);
             return mirrorTexture;
-        }(),
-        destroyMirrorTexture};
+        },
+                      [hmd = HMD.get()](ovrTexture * mt) { ovr_DestroyMirrorTexture(hmd, mt); });
     VALIDATE(OVR_SUCCESS(result), "Failed to create mirror texture.");
 
+    // Initialize the scene
     auto roomScene = Scene{};
 
     auto mainCam = Camera{XMVectorSet(0.0f, 1.6f, 5.0f, 0), XMQuaternionIdentity()};
@@ -126,22 +137,28 @@ static bool MainLoop(bool retryCreate) {
 
     // Main loop
     while (DIRECTX.HandleMessages()) {
-        const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -0.05f, 0), mainCam.Rot);
-        const auto right = XMVector3Rotate(XMVectorSet(0.05f, 0, 0, 0), mainCam.Rot);
-        if (DIRECTX.Key['W'] || DIRECTX.Key[VK_UP]) mainCam.Pos = XMVectorAdd(mainCam.Pos, forward);
-        if (DIRECTX.Key['S'] || DIRECTX.Key[VK_DOWN])
-            mainCam.Pos = XMVectorSubtract(mainCam.Pos, forward);
-        if (DIRECTX.Key['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
-        if (DIRECTX.Key['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
-        static auto Yaw = 0.0f;
-        if (DIRECTX.Key[VK_LEFT])
-            mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw += 0.02f, 0);
-        if (DIRECTX.Key[VK_RIGHT])
-            mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw -= 0.02f, 0);
+        // Handle input
+        [&mainCam] {
+            const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -0.05f, 0), mainCam.Rot);
+            const auto right = XMVector3Rotate(XMVectorSet(0.05f, 0, 0, 0), mainCam.Rot);
+            if (DIRECTX.Key['W'] || DIRECTX.Key[VK_UP])
+                mainCam.Pos = XMVectorAdd(mainCam.Pos, forward);
+            if (DIRECTX.Key['S'] || DIRECTX.Key[VK_DOWN])
+                mainCam.Pos = XMVectorSubtract(mainCam.Pos, forward);
+            if (DIRECTX.Key['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
+            if (DIRECTX.Key['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
+            static auto Yaw = 0.0f;
+            if (DIRECTX.Key[VK_LEFT])
+                mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw += 0.02f, 0);
+            if (DIRECTX.Key[VK_RIGHT])
+                mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw -= 0.02f, 0);
+        }();
 
         // Animate the cube
-        static auto cubeClock = 0.0f;
-        roomScene.Models[0]->Pos = XMFLOAT3(9 * sin(cubeClock), 3, 9 * cos(cubeClock += 0.015f));
+        [&cube = roomScene.Models[0]] {
+            static auto cubeClock = 0.0f;
+            cube->Pos = XMFLOAT3(9 * sin(cubeClock), 3, 9 * cos(cubeClock += 0.015f));
+        }();
 
         // Get both eye poses simultaneously, with IPD offset already included.
         ovrPosef EyeRenderPose[2] = {};
@@ -152,43 +169,33 @@ static bool MainLoop(bool retryCreate) {
                 eyeRenderDesc[ovrEye_Left].HmdToEyeViewOffset,
                 eyeRenderDesc[ovrEye_Right].HmdToEyeViewOffset};
             ovr_CalcEyePoses(hmdState.HeadPose.ThePose, HmdToEyeViewOffset, EyeRenderPose);
-        }
-        ();
+        }();
 
         // Render Scene to Eye Buffers
         if (isVisible) {
             for (int eye = 0; eye < 2; ++eye) {
                 // Increment to use next texture, just before writing
                 const auto texIndex = EyeRenderTexture[eye].AdvanceToNextTexture();
-
                 DIRECTX.SetAndClearRenderTarget(EyeRenderTexture[eye].TexRtv[texIndex],
                                                 &EyeDepthBuffer[eye]);
-                DIRECTX.SetViewport(
-                    (float)eyeRenderViewport[eye].Pos.x, (float)eyeRenderViewport[eye].Pos.y,
-                    (float)eyeRenderViewport[eye].Size.w, (float)eyeRenderViewport[eye].Size.h);
+                DIRECTX.SetViewport(eyeRenderViewport[eye]);
 
                 // Get the pose information in XM format
-                const auto eyeQuat =
-                    XMVectorSet(EyeRenderPose[eye].Orientation.x, EyeRenderPose[eye].Orientation.y,
-                                EyeRenderPose[eye].Orientation.z, EyeRenderPose[eye].Orientation.w);
-                const auto eyePos =
-                    XMVectorSet(EyeRenderPose[eye].Position.x, EyeRenderPose[eye].Position.y,
-                                EyeRenderPose[eye].Position.z, 0);
+                const auto& ori = EyeRenderPose[eye].Orientation;
+                const auto eyeQuat = XMVectorSet(ori.x, ori.y, ori.z, ori.w);
+                const auto& pos = EyeRenderPose[eye].Position;
+                const auto eyePos = XMVectorSet(pos.x, pos.y, pos.z, 0);
 
                 // Get view and projection matrices for the Rift camera
                 const auto CombinedPos =
                     XMVectorAdd(mainCam.Pos, XMVector3Rotate(eyePos, mainCam.Rot));
                 const auto finalCam =
                     Camera{CombinedPos, XMQuaternionMultiply(eyeQuat, mainCam.Rot)};
-                const auto view = finalCam.GetViewMatrix();
                 const auto p = ovrMatrix4f_Projection(eyeRenderDesc[eye].Fov, 0.2f, 1000.0f,
                                                       ovrProjection_RightHanded);
-                const auto proj =
-                    XMMatrixSet(p.M[0][0], p.M[1][0], p.M[2][0], p.M[3][0], p.M[0][1], p.M[1][1],
-                                p.M[2][1], p.M[3][1], p.M[0][2], p.M[1][2], p.M[2][2], p.M[3][2],
-                                p.M[0][3], p.M[1][3], p.M[2][3], p.M[3][3]);
-                const auto prod = XMMatrixMultiply(view, proj);
-                roomScene.Render(prod);
+                const auto xp = XMFLOAT4X4{&p.M[0][0]};
+                const auto proj = XMMatrixTranspose(XMLoadFloat4x4(&xp));
+                roomScene.Render(XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
             }
         }
 
@@ -198,7 +205,7 @@ static bool MainLoop(bool retryCreate) {
         ld.Header.Flags = 0;
 
         for (int eye = 0; eye < 2; ++eye) {
-            ld.ColorTexture[eye] = EyeRenderTexture[eye].TextureSet;
+            ld.ColorTexture[eye] = EyeRenderTexture[eye].TextureSet.get();
             ld.Viewport[eye] = eyeRenderViewport[eye];
             ld.Fov[eye] = hmdDesc.DefaultEyeFov[eye];
             ld.RenderPose[eye] = EyeRenderPose[eye];

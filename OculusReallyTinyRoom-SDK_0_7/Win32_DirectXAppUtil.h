@@ -23,6 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
@@ -259,8 +260,9 @@ struct DirectX11 {
                                        1, 0);
     }
 
-    void SetViewport(float vpX, float vpY, float vpW, float vpH) const {
-        D3D11_VIEWPORT D3Dvp{vpX, vpY, vpW, vpH, 0.0f, 1.0f};
+    void SetViewport(const ovrRecti& vp) const {
+        D3D11_VIEWPORT D3Dvp{
+            float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w), float(vp.Size.h), 0.0f, 1.0f};
         Context->RSSetViewports(1, &D3Dvp);
     }
 
