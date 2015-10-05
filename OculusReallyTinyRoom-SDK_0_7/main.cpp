@@ -24,13 +24,10 @@ limitations under the License.
 /// It runs with DirectX11.
 
 #include <algorithm>
-#include <cstdint>
-#include <cstdio>
+#include <array>
 #include <functional>
 #include <initializer_list>
-#include <iterator>
 #include <memory>
-#include <numeric>
 #include <type_traits>
 #include <vector>
 
@@ -84,43 +81,39 @@ struct DepthBuffer {
         CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h);
         dsDesc.MipLevels = 1;
         dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        dsDesc.SampleDesc.Count = 1;
         ID3D11Texture2DPtr Tex;
         Device->CreateTexture2D(&dsDesc, NULL, &Tex);
         Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
     }
 };
 
-struct WindowClass {
-    HWND Window = nullptr;
+struct Window {
+    HWND Hwnd = nullptr;
     bool Running = false;
-    bool Key[256] = {};
+    bool Keys[256] = {};
 
-    static LRESULT CALLBACK WindowProc(_In_ HWND hWnd, _In_ UINT Msg, _In_ WPARAM wParam,
-        _In_ LPARAM lParam) {
-        auto p = reinterpret_cast<WindowClass*>(GetWindowLongPtr(hWnd, 0));
+    static LRESULT CALLBACK WindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
+        auto p = reinterpret_cast<Window*>(GetWindowLongPtr(hWnd, 0));
         switch (Msg) {
-        case WM_KEYDOWN:
-            p->Key[wParam] = true;
-            break;
-        case WM_KEYUP:
-            p->Key[wParam] = false;
-            break;
-        case WM_DESTROY:
-            p->Running = false;
-            break;
-        default:
-            return DefWindowProcW(hWnd, Msg, wParam, lParam);
+            case WM_KEYDOWN:
+                p->Keys[wParam] = true;
+                break;
+            case WM_KEYUP:
+                p->Keys[wParam] = false;
+                break;
+            case WM_DESTROY:
+                p->Running = false;
+                break;
+            default:
+                return DefWindowProcW(hWnd, Msg, wParam, lParam);
         }
-        if ((p->Key['Q'] && p->Key[VK_CONTROL]) || p->Key[VK_ESCAPE]) {
+        if ((p->Keys['Q'] && p->Keys[VK_CONTROL]) || p->Keys[VK_ESCAPE]) {
             p->Running = false;
         }
         return 0;
     }
 
-    auto InitWindow(HINSTANCE hinst, LPCWSTR title) {
-        Running = true;
-
+    Window(HINSTANCE hinst, LPCWSTR title) : Running{true} {
         WNDCLASSW wc{};
         wc.lpszClassName = L"App";
         wc.style = CS_OWNDC;
@@ -129,13 +122,10 @@ struct WindowClass {
         RegisterClassW(&wc);
 
         // adjust the window size and show at InitDevice time
-        Window =
+        Hwnd =
             CreateWindowW(wc.lpszClassName, title, WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, 0, 0, hinst, 0);
-        if (!Window) return false;
 
-        SetWindowLongPtr(Window, 0, LONG_PTR(this));
-
-        return true;
+        SetWindowLongPtr(Hwnd, 0, reinterpret_cast<LONG_PTR>(this));
     }
 
     auto HandleMessages() const {
@@ -147,7 +137,7 @@ struct WindowClass {
         return Running;
     }
 
-    void Run(bool(*MainLoop)(const WindowClass& window, bool retryCreate)) const {
+    void Run(bool (*MainLoop)(const Window& window, bool retryCreate)) const {
         // false => just fail on any error
         VALIDATE(MainLoop(*this, false), "Oculus Rift not detected.");
         while (HandleMessages()) {
@@ -166,79 +156,73 @@ struct DirectX11 {
     ID3D11DeviceContextPtr Context;
     IDXGISwapChainPtr SwapChain;
     ID3D11Texture2DPtr BackBuffer;
-    ID3D11RenderTargetViewPtr BackBufferRT;
     ID3D11VertexShaderPtr D3DVert;
     ID3D11PixelShaderPtr D3DPix;
     ID3D11InputLayoutPtr InputLayout;
     ID3D11SamplerStatePtr SamplerState;
-    // Fixed size buffer for shader constants, before copied into buffer
-    std::uint8_t UniformData[1024];
-    ID3D11BufferPtr UniformBufferGen;
+    ID3D11BufferPtr ConstantBuffer;
 
-    bool InitDevice(HWND window, int vpW, int vpH, const LUID* pLuid);
+    DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid);
 
     void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget,
-        DepthBuffer* depthbuffer) const {
+                                 DepthBuffer* depthbuffer) const {
         Context->OMSetRenderTargets(1, &rendertarget, depthbuffer->TexDsv);
-        Context->ClearRenderTargetView(rendertarget, std::begin({ 0.0f, 0.0f, 0.0f, 0.0f }));
+        Context->ClearRenderTargetView(rendertarget, std::begin({0.0f, 0.0f, 0.0f, 0.0f}));
         Context->ClearDepthStencilView(depthbuffer->TexDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
-            1, 0);
+                                       1, 0);
     }
 
     void SetViewport(const ovrRecti& vp) const {
         D3D11_VIEWPORT D3Dvp{
-            float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w), float(vp.Size.h), 0.0f, 1.0f };
+            float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w), float(vp.Size.h), 0.0f, 1.0f};
         Context->RSSetViewports(1, &D3Dvp);
     }
 };
 
-// global DX11 state
-static DirectX11 directx;
-
 enum class TextureFill { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING };
 
-auto createTexture(TextureFill texFill) {
-    const int SizeW{ 256 }, SizeH{ 256 }, MipLevels{ 8 };
-    CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, SizeW, SizeH, 1, MipLevels,
-        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFill texFill) {
+    const int w{256}, h{256}, mips{8};
+    CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, w, h, 1, mips,
+                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
     dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
-    ID3D11Texture2DPtr Tex;
-    directx.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
-    ID3D11ShaderResourceViewPtr TexSv;
-    directx.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
+    ID3D11Texture2DPtr tex;
+    device->CreateTexture2D(&dsDesc, nullptr, &tex);
+    ID3D11ShaderResourceViewPtr texSrv;
+    device->CreateShaderResourceView(tex, nullptr, &texSrv);
 
     // Fill texture with requested pattern
-    std::vector<DWORD> pix(SizeW * SizeH);
-    for (int j = 0; j < SizeH; ++j)
-        for (int i = 0; i < SizeW; ++i) {
-            auto& curr = pix[j * SizeW + i];
+    std::vector<DWORD> pix(w * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            auto& curr = pix[y * w + x];
             switch (texFill) {
-            case (TextureFill::AUTO_WALL) :
-                curr = (((j / 4 & 15) == 0) ||
-                    (((i / 4 & 15) == 0) &&
-                        ((((i / 4 & 31) == 0) ^ ((j / 4 >> 4) & 1)) == 0)))
-                ? 0xff3c3c3c
-                : 0xffb4b4b4;
-                break;
-            case (TextureFill::AUTO_FLOOR) :
-                curr = (((i >> 7) ^ (j >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
-                break;
-            case (TextureFill::AUTO_CEILING) :
-                curr = (i / 4 == 0 || j / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
-                break;
-            case (TextureFill::AUTO_WHITE) :
-                curr = 0xffffffff;
-                break;
-            default:
-                curr = 0xffffffff;
-                break;
+                case (TextureFill::AUTO_WALL):
+                    curr =
+                        (((y / 4 & 15) == 0) ||
+                         (((x / 4 & 15) == 0) && ((((x / 4 & 31) == 0) ^ ((y / 4 >> 4) & 1)) == 0)))
+                            ? 0xff3c3c3c
+                            : 0xffb4b4b4;
+                    break;
+                case (TextureFill::AUTO_FLOOR):
+                    curr = (((x >> 7) ^ (y >> 7)) & 1) ? 0xffb4b4b4 : 0xff505050;
+                    break;
+                case (TextureFill::AUTO_CEILING):
+                    curr = (x / 4 == 0 || y / 4 == 0) ? 0xff505050 : 0xffb4b4b4;
+                    break;
+                case (TextureFill::AUTO_WHITE):
+                    curr = 0xffffffff;
+                    break;
+                default:
+                    curr = 0xffffffff;
+                    break;
             }
         }
-    directx.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
-    directx.Context->GenerateMips(TexSv);
+    context->UpdateSubresource(tex, 0, nullptr, pix.data(), w * 4, 0);
+    context->GenerateMips(texSrv);
 
-    return TexSv;
+    return texSrv;
 }
 
 struct Vertex {
@@ -252,59 +236,59 @@ struct TriangleSet {
     std::vector<short> Indices;
 
     void AddBox(float x1, float y1, float z1, float x2, float y2, float z2, DWORD c) {
-        auto AddQuad = [this](Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
-            auto AddTriangle = [this](const std::initializer_list<Vertex>& vs) {
+        auto addQuad = [this](Vertex v0, Vertex v1, Vertex v2, Vertex v3) {
+            auto addTriangle = [this](const std::initializer_list<Vertex>& vs) {
                 for (const auto& v : vs) {
                     Indices.push_back(static_cast<short>(size(Vertices)));
                     Vertices.push_back(v);
                 }
             };
 
-            AddTriangle({ v0, v1, v2 });
-            AddTriangle({ v3, v2, v1 });
+            addTriangle({v0, v1, v2});
+            addTriangle({v3, v2, v1});
         };
 
-        auto ModifyColor = [](DWORD c, XMFLOAT3 pos) {
+        auto modifyColor = [](DWORD c, XMFLOAT3 pos) {
             const auto v = XMLoadFloat3(&pos);
             auto length = [](const auto& v) { return XMVectorGetX(XMVector3Length(v)); };
             const auto dist1 = length(XMVectorAdd(v, XMVectorSet(2.0f, -4.0f, 2.0f, 0.0f)));
             const auto dist2 = length(XMVectorAdd(v, XMVectorSet(-3.0f, -4.0f, 3.0f, 0.0f)));
             const auto dist3 = length(XMVectorAdd(v, XMVectorSet(4.0f, -3.0f, -25.0f, 0.0f)));
             int bri = rand() % 160;
-            float R = ((c >> 16) & 0xff) *
-                (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-            float G = ((c >> 8) & 0xff) *
-                (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-            float B = ((c >> 0) & 0xff) *
-                (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
-            return ((c & 0xff000000) + ((R > 255 ? 255 : (DWORD)R) << 16) +
-                ((G > 255 ? 255 : (DWORD)G) << 8) + (B > 255 ? 255 : (DWORD)B));
+            float r = ((c >> 16) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            float g = ((c >> 8) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            float b = ((c >> 0) & 0xff) *
+                      (bri + 192.0f * (0.65f + 8 / dist1 + 1 / dist2 + 4 / dist3)) / 255.0f;
+            return ((c & 0xff000000) + ((r > 255 ? 255 : (DWORD)r) << 16) +
+                    ((g > 255 ? 255 : (DWORD)g) << 8) + (b > 255 ? 255 : (DWORD)b));
         };
 
-        AddQuad({ { x1, y2, z1 }, ModifyColor(c,{ x1, y2, z1 }), z1, x1 },
-        { { x2, y2, z1 }, ModifyColor(c,{ x2, y2, z1 }), z1, x2 },
-        { { x1, y2, z2 }, ModifyColor(c,{ x1, y2, z2 }), z2, x1 },
-        { { x2, y2, z2 }, ModifyColor(c,{ x2, y2, z2 }), z2, x2 });
-        AddQuad({ { x2, y1, z1 }, ModifyColor(c,{ x2, y1, z1 }), z1, x2 },
-        { { x1, y1, z1 }, ModifyColor(c,{ x1, y1, z1 }), z1, x1 },
-        { { x2, y1, z2 }, ModifyColor(c,{ x2, y1, z2 }), z2, x2 },
-        { { x1, y1, z2 }, ModifyColor(c,{ x1, y1, z2 }), z2, x1 });
-        AddQuad({ { x1, y1, z2 }, ModifyColor(c,{ x1, y1, z2 }), z2, y1 },
-        { { x1, y1, z1 }, ModifyColor(c,{ x1, y1, z1 }), z1, y1 },
-        { { x1, y2, z2 }, ModifyColor(c,{ x1, y2, z2 }), z2, y2 },
-        { { x1, y2, z1 }, ModifyColor(c,{ x1, y2, z1 }), z1, y2 });
-        AddQuad({ { x2, y1, z1 }, ModifyColor(c,{ x2, y1, z1 }), z1, y1 },
-        { { x2, y1, z2 }, ModifyColor(c,{ x2, y1, z2 }), z2, y1 },
-        { { x2, y2, z1 }, ModifyColor(c,{ x2, y2, z1 }), z1, y2 },
-        { { x2, y2, z2 }, ModifyColor(c,{ x2, y2, z2 }), z2, y2 });
-        AddQuad({ { x1, y1, z1 }, ModifyColor(c,{ x1, y1, z1 }), x1, y1 },
-        { { x2, y1, z1 }, ModifyColor(c,{ x2, y1, z1 }), x2, y1 },
-        { { x1, y2, z1 }, ModifyColor(c,{ x1, y2, z1 }), x1, y2 },
-        { { x2, y2, z1 }, ModifyColor(c,{ x2, y2, z1 }), x2, y2 });
-        AddQuad({ { x2, y1, z2 }, ModifyColor(c,{ x2, y1, z2 }), x2, y1 },
-        { { x1, y1, z2 }, ModifyColor(c,{ x1, y1, z2 }), x1, y1 },
-        { { x2, y2, z2 }, ModifyColor(c,{ x2, y2, z2 }), x2, y2 },
-        { { x1, y2, z2 }, ModifyColor(c,{ x1, y2, z2 }), x1, y2 });
+        addQuad({{x1, y2, z1}, modifyColor(c, {x1, y2, z1}), z1, x1},
+                {{x2, y2, z1}, modifyColor(c, {x2, y2, z1}), z1, x2},
+                {{x1, y2, z2}, modifyColor(c, {x1, y2, z2}), z2, x1},
+                {{x2, y2, z2}, modifyColor(c, {x2, y2, z2}), z2, x2});
+        addQuad({{x2, y1, z1}, modifyColor(c, {x2, y1, z1}), z1, x2},
+                {{x1, y1, z1}, modifyColor(c, {x1, y1, z1}), z1, x1},
+                {{x2, y1, z2}, modifyColor(c, {x2, y1, z2}), z2, x2},
+                {{x1, y1, z2}, modifyColor(c, {x1, y1, z2}), z2, x1});
+        addQuad({{x1, y1, z2}, modifyColor(c, {x1, y1, z2}), z2, y1},
+                {{x1, y1, z1}, modifyColor(c, {x1, y1, z1}), z1, y1},
+                {{x1, y2, z2}, modifyColor(c, {x1, y2, z2}), z2, y2},
+                {{x1, y2, z1}, modifyColor(c, {x1, y2, z1}), z1, y2});
+        addQuad({{x2, y1, z1}, modifyColor(c, {x2, y1, z1}), z1, y1},
+                {{x2, y1, z2}, modifyColor(c, {x2, y1, z2}), z2, y1},
+                {{x2, y2, z1}, modifyColor(c, {x2, y2, z1}), z1, y2},
+                {{x2, y2, z2}, modifyColor(c, {x2, y2, z2}), z2, y2});
+        addQuad({{x1, y1, z1}, modifyColor(c, {x1, y1, z1}), x1, y1},
+                {{x2, y1, z1}, modifyColor(c, {x2, y1, z1}), x2, y1},
+                {{x1, y2, z1}, modifyColor(c, {x1, y2, z1}), x1, y2},
+                {{x2, y2, z1}, modifyColor(c, {x2, y2, z1}), x2, y2});
+        addQuad({{x2, y1, z2}, modifyColor(c, {x2, y1, z2}), x2, y1},
+                {{x1, y1, z2}, modifyColor(c, {x1, y1, z2}), x1, y1},
+                {{x2, y2, z2}, modifyColor(c, {x2, y2, z2}), x2, y2},
+                {{x1, y2, z2}, modifyColor(c, {x1, y2, z2}), x1, y2});
     }
 };
 
@@ -316,44 +300,44 @@ struct Model {
     ID3D11BufferPtr IndexBuffer;
     std::size_t NumIndices;
 
-    Model(const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot, ID3D11ShaderResourceView* tex)
-        : Pos(argPos), Rot(argRot), Tex(tex), NumIndices{ size(t.Indices) } {
+    Model(ID3D11Device* device, const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot,
+          ID3D11ShaderResourceView* tex)
+        : Pos(argPos), Rot(argRot), Tex(tex), NumIndices{size(t.Indices)} {
         CD3D11_BUFFER_DESC vbDesc(size(t.Vertices) * sizeof(t.Vertices.back()),
-            D3D11_BIND_VERTEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA vbData{ t.Vertices.data(), 0, 0 };
-        directx.Device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
+                                  D3D11_BIND_VERTEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA vbData{t.Vertices.data(), 0, 0};
+        device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
 
         CD3D11_BUFFER_DESC ibDesc(size(t.Indices) * sizeof(t.Indices.back()),
-            D3D11_BIND_INDEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA ibData{ t.Indices.data(), 0, 0 };
-        directx.Device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
+                                  D3D11_BIND_INDEX_BUFFER);
+        D3D11_SUBRESOURCE_DATA ibData{t.Indices.data(), 0, 0};
+        device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
     }
 
-    void Render(const XMMATRIX& projView) const {
+    void Render(DirectX11& directx, const XMMATRIX& projView) const {
         const auto modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
-            XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
+                                               XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
         const auto mat = XMMatrixMultiply(modelMat, projView);
-        memcpy(directx.UniformData, &mat, sizeof(mat));  // ProjView
 
-        D3D11_MAPPED_SUBRESOURCE map{};
-        directx.Context->Map(directx.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-        memcpy(map.pData, &directx.UniformData, std::size(directx.UniformData));
-        directx.Context->Unmap(directx.UniformBufferGen, 0);
+        auto map = D3D11_MAPPED_SUBRESOURCE{};
+        directx.Context->Map(directx.ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+        memcpy(map.pData, &mat, sizeof(mat));
+        directx.Context->Unmap(directx.ConstantBuffer, 0);
 
         directx.Context->IASetInputLayout(directx.InputLayout);
         directx.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
-        const auto vbs = { VertexBuffer.GetInterfacePtr() };
-        directx.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({ sizeof(Vertex) }),
-            std::begin({ UINT(0) }));
+        const auto vbs = {VertexBuffer.GetInterfacePtr()};
+        directx.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({sizeof(Vertex)}),
+                                            std::begin({UINT(0)}));
         directx.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         directx.Context->VSSetShader(directx.D3DVert, nullptr, 0);
         directx.Context->PSSetShader(directx.D3DPix, nullptr, 0);
 
-        const auto samplerStates = { directx.SamplerState.GetInterfacePtr() };
+        const auto samplerStates = {directx.SamplerState.GetInterfacePtr()};
         directx.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
 
-        const auto texSrvs = { Tex.GetInterfacePtr() };
+        const auto texSrvs = {Tex.GetInterfacePtr()};
         directx.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
         directx.Context->DrawIndexed(NumIndices, 0, 0);
     }
@@ -362,48 +346,50 @@ struct Model {
 struct Scene {
     std::vector<std::unique_ptr<Model>> Models;
 
-    void Add(Model* n) { Models.emplace_back(n); }
-
-    void Render(const XMMATRIX& projView) const {
-        for (const auto& model : Models) model->Render(projView);
+    void Render(DirectX11& directx, const XMMATRIX& projView) const {
+        for (const auto& model : Models) model->Render(directx, projView);
     }
 
-    Scene() {
+    Scene(ID3D11Device* device, ID3D11DeviceContext* context) {
+        auto add = [this](Model* n) { Models.emplace_back(n); };
+
         TriangleSet cube;
         cube.AddBox(0.5f, -0.5f, 0.5f, -0.5f, 0.5f, -0.5f, 0xff404040);
-        Add(new Model(cube, { 0, 0, 0 }, { 0, 0, 0, 1 }, createTexture(TextureFill::AUTO_CEILING)));
+        add(new Model(device, cube, {0, 0, 0}, {0, 0, 0, 1},
+                      createTexture(device, context, TextureFill::AUTO_CEILING)));
 
         TriangleSet spareCube;
         spareCube.AddBox(0.1f, -0.1f, 0.1f, -0.1f, +0.1f, -0.1f, 0xffff0000);
-        Add(new Model(spareCube, { 0, -10, 0 }, { 0, 0, 0, 1 },
-            createTexture(TextureFill::AUTO_CEILING)));
+        add(new Model(device, spareCube, {0, -10, 0}, {0, 0, 0, 1},
+                      createTexture(device, context, TextureFill::AUTO_CEILING)));
 
         TriangleSet walls;
         walls.AddBox(10.1f, 0.0f, 20.0f, 10.0f, 4.0f, -20.0f, 0xff808080);     // Left Wall
         walls.AddBox(10.0f, -0.1f, 20.1f, -10.0f, 4.0f, 20.0f, 0xff808080);    // Back Wall
         walls.AddBox(-10.0f, -0.1f, 20.0f, -10.1f, 4.0f, -20.0f, 0xff808080);  // Right Wall
-        Add(new Model(walls, { 0, 0, 0 }, { 0, 0, 0, 1 }, createTexture(TextureFill::AUTO_WALL)));
+        add(new Model(device, walls, {0, 0, 0}, {0, 0, 0, 1},
+                      createTexture(device, context, TextureFill::AUTO_WALL)));
 
         TriangleSet floors;
         floors.AddBox(10.0f, -0.1f, 20.0f, -10.0f, 0.0f, -20.1f, 0xff808080);    // Main floor
         floors.AddBox(15.0f, -6.1f, -18.0f, -15.0f, -6.0f, -30.0f, 0xff808080);  // Bottom floor
-        Add(new Model(floors, { 0, 0, 0 }, { 0, 0, 0, 1 },
-            createTexture(TextureFill::AUTO_FLOOR)));  // Floors
+        add(new Model(device, floors, {0, 0, 0}, {0, 0, 0, 1},
+                      createTexture(device, context, TextureFill::AUTO_FLOOR)));  // Floors
 
         TriangleSet ceiling;
         ceiling.AddBox(10.0f, 4.0f, 20.0f, -10.0f, 4.1f, -20.1f, 0xff808080);
-        Add(new Model(ceiling, { 0, 0, 0 }, { 0, 0, 0, 1 },
-            createTexture(TextureFill::AUTO_CEILING)));  // Ceiling
+        add(new Model(device, ceiling, {0, 0, 0}, {0, 0, 0, 1},
+                      createTexture(device, context, TextureFill::AUTO_CEILING)));  // Ceiling
 
         TriangleSet furniture;
         furniture.AddBox(-9.5f, 0.75f, -3.0f, -10.1f, 2.5f, -3.1f,
-            0xff383838);  // Right side shelf// Verticals
+                         0xff383838);  // Right side shelf// Verticals
         furniture.AddBox(-9.5f, 0.95f, -3.7f, -10.1f, 2.75f, -3.8f,
-            0xff383838);  // Right side shelf
+                         0xff383838);  // Right side shelf
         furniture.AddBox(-9.55f, 1.20f, -2.5f, -10.1f, 1.30f, -3.75f,
-            0xff383838);  // Right side shelf// Horizontals
+                         0xff383838);  // Right side shelf// Horizontals
         furniture.AddBox(-9.55f, 2.00f, -3.05f, -10.1f, 2.10f, -4.2f,
-            0xff383838);  // Right side shelf
+                         0xff383838);  // Right side shelf
         furniture.AddBox(-5.0f, 1.1f, -20.0f, -10.0f, 1.2f, -20.1f, 0xff383838);  // Right railing
         furniture.AddBox(10.0f, 1.1f, -20.0f, 5.0f, 1.2f, -20.1f, 0xff383838);    // Left railing
         for (float f = 5; f <= 9; f += 1)
@@ -421,11 +407,12 @@ struct Scene {
         furniture.AddBox(0.799f, 0.0f, 0.499f, 0.861f, 0.5f, 0.561f, 0xff202050);   // Chair Leg 2
         furniture.AddBox(0.799f, 1.0f, 1.101f, 0.861f, 0.0f, 1.039f, 0xff202050);   // Chair Leg 2
         furniture.AddBox(1.4f, 0.97f, 1.05f, 0.8f, 0.92f, 1.10f,
-            0xff202050);  // Chair Back high bar
+                         0xff202050);  // Chair Back high bar
         for (float f = 3.0f; f <= 6.6f; f += 0.4f)
             furniture.AddBox(3, 0.0f, -f, 2.9f, 1.3f, -f - 0.1f, 0xff404040);  // Posts
-        Add(new Model(furniture, { 0, 0, 0 }, { 0, 0, 0, 1 },
-            createTexture(TextureFill::AUTO_WHITE)));  // Fixtures & furniture
+        add(new Model(
+            device, furniture, {0, 0, 0}, {0, 0, 0, 1},
+            createTexture(device, context, TextureFill::AUTO_WHITE)));  // Fixtures & furniture
     }
 };
 
@@ -435,7 +422,7 @@ struct Camera {
     auto GetViewMatrix() const {
         const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), Rot);
         return XMMatrixLookAtRH(Pos, XMVectorAdd(Pos, forward),
-            XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Rot));
+                                XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Rot));
     }
 };
 
@@ -443,10 +430,10 @@ struct Camera {
 // rendering.
 struct OculusTexture {
     std::unique_ptr<ovrSwapTextureSet, std::function<void(ovrSwapTextureSet*)>> TextureSet;
-    ID3D11RenderTargetViewPtr TexRtv[2];
+    ID3D11RenderTargetViewPtr TexRtvs[2];
 
-    OculusTexture(ovrHmd hmd, ovrSizei size)
-        : TextureSet{[hmd, size, &texRtv = TexRtv] {
+    OculusTexture(ID3D11Device* device, ovrHmd hmd, ovrSizei size)
+        : TextureSet{[hmd, size, device, &texRtv = TexRtvs] {
                          // Create and validate the swap texture set and stash it in unique_ptr
                          CD3D11_TEXTURE2D_DESC dsDesc(
                              DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
@@ -454,7 +441,7 @@ struct OculusTexture {
 
                          ovrSwapTextureSet* ts{};
                          auto result = ovr_CreateSwapTextureSetD3D11(
-                             hmd, directx.Device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
+                             hmd, device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
                          VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
                          VALIDATE(ts->TextureCount == std::size(texRtv), "TextureCount mismatch.");
                          return ts;
@@ -463,11 +450,11 @@ struct OculusTexture {
                      [hmd](ovrSwapTextureSet* ts) { ovr_DestroySwapTextureSet(hmd, ts); }} {
         // Create render target views for each of the textures in the swap texture set
         std::transform(TextureSet->Textures, TextureSet->Textures + TextureSet->TextureCount,
-                       TexRtv, [](auto tex) {
+                       TexRtvs, [device](auto tex) {
                            CD3D11_RENDER_TARGET_VIEW_DESC rtvd(D3D11_RTV_DIMENSION_TEXTURE2D,
                                                                DXGI_FORMAT_R8G8B8A8_UNORM);
                            ID3D11RenderTargetViewPtr rtv;
-                           directx.Device->CreateRenderTargetView(
+                           device->CreateRenderTargetView(
                                reinterpret_cast<ovrD3D11Texture&>(tex).D3D11.pTexture, &rtvd, &rtv);
                            return rtv;
                        });
@@ -478,44 +465,36 @@ struct OculusTexture {
     }
 };
 
-bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
-    WinSizeW = vpW;
-    WinSizeH = vpH;
-
-    auto windowSize = RECT{ 0, 0, vpW, vpH };
+DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
+    : WinSizeW{vpW}, WinSizeH{vpH} {
+    auto windowSize = RECT{0, 0, WinSizeW, WinSizeH};
     AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
-    const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
+    const auto flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
     if (!SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
-        windowSize.bottom - windowSize.top, flags))
-        return false;
+                      windowSize.bottom - windowSize.top, flags))
+        VALIDATE(false, "SetWindowPos() failed.");
 
-    IDXGIFactoryPtr DXGIFactory;
-    auto hr = CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
+    IDXGIFactoryPtr dxgiFactory;
+    auto hr = CreateDXGIFactory1(dxgiFactory.GetIID(), reinterpret_cast<void**>(&dxgiFactory));
     VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
 
-    IDXGIAdapterPtr Adapter;
-    for (UINT iAdapter = 0;
-    DXGIFactory->EnumAdapters(iAdapter, &Adapter) != DXGI_ERROR_NOT_FOUND; ++iAdapter) {
-        DXGI_ADAPTER_DESC adapterDesc;
-        Adapter->GetDesc(&adapterDesc);
-        if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0)
-            break;
+    IDXGIAdapterPtr adapter;
+    for (int iAdapter = 0; dxgiFactory->EnumAdapters(iAdapter, &adapter) != DXGI_ERROR_NOT_FOUND;
+         ++iAdapter) {
+        DXGI_ADAPTER_DESC adapterDesc{};
+        adapter->GetDesc(&adapterDesc);
+        if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0) break;
     }
 
-    const D3D11_CREATE_DEVICE_FLAG createFlags = [] {
+    auto DriverType = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+    const auto createFlags = [] {
 #ifdef _DEBUG
         return D3D11_CREATE_DEVICE_DEBUG;
 #else
-        return 0;
+        return D3D11_CREATE_DEVICE_FLAG(0);
 #endif
     }();
-    auto DriverType = Adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
-    hr = D3D11CreateDevice(Adapter, DriverType, 0, createFlags, nullptr, 0, D3D11_SDK_VERSION,
-        &Device, nullptr, &Context);
-    VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
-
-    // Create swap chain
-    DXGI_SWAP_CHAIN_DESC scDesc{};
+    auto scDesc = DXGI_SWAP_CHAIN_DESC{};
     scDesc.BufferCount = 2;
     scDesc.BufferDesc.Width = WinSizeW;
     scDesc.BufferDesc.Height = WinSizeH;
@@ -526,22 +505,20 @@ bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
     scDesc.SampleDesc.Count = 1;
     scDesc.Windowed = TRUE;
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
-    hr = DXGIFactory->CreateSwapChain(Device, &scDesc, &SwapChain);
-    VALIDATE((hr == ERROR_SUCCESS), "CreateSwapChain failed");
+    hr = D3D11CreateDeviceAndSwapChain(adapter, DriverType, nullptr, createFlags, nullptr, 0,
+                                       D3D11_SDK_VERSION, &scDesc, &SwapChain, &Device, nullptr,
+                                       &Context);
+    VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
 
     // Create backbuffer
-    SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
-    hr = Device->CreateRenderTargetView(BackBuffer, nullptr, &BackBufferRT);
-    VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
-
-    auto rts = { BackBufferRT.GetInterfacePtr() };
-    Context->OMSetRenderTargets(size(rts), begin(rts), nullptr);
+    hr = SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
+    VALIDATE((hr == ERROR_SUCCESS), "IDXGISwapChain::GetBuffer() failed");
 
     // Buffer for shader constants
-    CD3D11_BUFFER_DESC uniformBufferDesc(std::size(UniformData), D3D11_BIND_CONSTANT_BUFFER,
-        D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-    Device->CreateBuffer(&uniformBufferDesc, nullptr, &UniformBufferGen);
-    auto buffs = { UniformBufferGen.GetInterfacePtr() };
+    CD3D11_BUFFER_DESC uniformBufferDesc(sizeof(XMMATRIX), D3D11_BIND_CONSTANT_BUFFER,
+                                         D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+    Device->CreateBuffer(&uniformBufferDesc, nullptr, &ConstantBuffer);
+    auto buffs = {ConstantBuffer.GetInterfacePtr()};
     Context->VSSetConstantBuffers(0, size(buffs), begin(buffs));
 
     // Set max frame latency to 1
@@ -552,7 +529,7 @@ bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
 
     // Set up render states
     // Create and set rasterizer state
-    CD3D11_RASTERIZER_DESC rs{ D3D11_DEFAULT };
+    auto rs = CD3D11_RASTERIZER_DESC{D3D11_DEFAULT};
     rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
     ID3D11RasterizerStatePtr rss;
     Device->CreateRasterizerState(&rs, &rss);
@@ -560,23 +537,18 @@ bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
 
     // Create and set depth stencil state
     ID3D11DepthStencilStatePtr dss;
-    Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{ D3D11_DEFAULT }, &dss);
+    Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT}, &dss);
     Context->OMSetDepthStencilState(dss, 0);
 
     // Create and set blend state
-    CD3D11_BLEND_DESC bm{ D3D11_DEFAULT };
-    bm.RenderTarget[0].BlendEnable = TRUE;
-    bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
-    bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
-        D3D11_BLEND_INV_SRC_ALPHA;
     ID3D11BlendStatePtr bs;
-    Device->CreateBlendState(&bm, &bs);
+    Device->CreateBlendState(&CD3D11_BLEND_DESC{D3D11_DEFAULT}, &bs);
     Context->OMSetBlendState(bs, nullptr, 0xffffffff);
 
     auto compileShader = [](const char* src, const char* target) {
         ID3DBlobPtr blob;
-        D3DCompile(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target, 0, 0,
-            &blob, nullptr);
+        D3DCompile(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target, 0, 0, &blob,
+                   nullptr);
         return blob;
     };
 
@@ -593,16 +565,15 @@ bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
                                              oCol = col;
                                          })";
     ID3DBlobPtr vsBlob = compileShader(defaultVertexShaderSrc, "vs_4_0");
-    Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
-        nullptr, &D3DVert);
+    Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr,
+                               &D3DVert);
     D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
-        { "Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        {"Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
     Device->CreateInputLayout(defaultVertexDesc, std::size(defaultVertexDesc),
-        vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
-        &InputLayout);
+                              vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &InputLayout);
 
     // Create pixel shader
     auto defaultPixelShaderSrc = R"(Texture2D Texture : register(t0);
@@ -611,22 +582,19 @@ bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
                                                     in float4 Color: COLOR0,
                                                     in float2  TexCoord : TEXCOORD0) : SV_Target {
                                             float4 TexCol = Texture.Sample(Linear, TexCoord);
-                                            if (TexCol.a==0) clip(-1); // If alpha = 0, don't draw
                                             return(Color * TexCol);
                                         })";
     auto psBlob = compileShader(defaultPixelShaderSrc, "ps_4_0");
-    Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
-        nullptr, &D3DPix);
+    Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
+                              &D3DPix);
 
     // Create sampler state
-    CD3D11_SAMPLER_DESC ss{ D3D11_DEFAULT };
+    CD3D11_SAMPLER_DESC ss{D3D11_DEFAULT};
     ss.Filter = D3D11_FILTER_ANISOTROPIC;
     ss.AddressU = ss.AddressV = ss.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     ss.MaxAnisotropy = 8;
     ss.MaxLOD = 15;
     Device->CreateSamplerState(&ss, &SamplerState);
-
-    return true;
 }
 
 // Helper to wrap ovr types like ovrHmd and ovrTexture* in a unique_ptr with custom create / destroy
@@ -637,7 +605,7 @@ auto create_unique(CreateFunc createFunc, DestroyFunc destroyFunc) {
 }
 
 // return true to retry later (e.g. after display lost)
-static bool MainLoop(const WindowClass& window, bool retryCreate) {
+static bool MainLoop(const Window& window, bool retryCreate) {
     auto result = ovrResult{};
     auto luid = ovrGraphicsLuid{};
     // Initialize the HMD, stash it in a unique_ptr for automatic cleanup.
@@ -654,9 +622,8 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
 
     // Setup Device and Graphics
     // Note: the mirror window can be any size, for this sample we use 1/2 the HMD resolution
-    if (!directx.InitDevice(window.Window, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
-                            reinterpret_cast<LUID*>(&luid)))
-        return retryCreate;
+    DirectX11 directx(window.Hwnd, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
+        reinterpret_cast<LUID*>(&luid));
 
     // Start the sensor which informs of the Rift's pose and motion
     result = ovr_ConfigureTracking(
@@ -665,17 +632,19 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
     VALIDATE(OVR_SUCCESS(result), "Failed to configure tracking.");
 
     // Make the eye render buffers (caution if actual size < requested due to HW limits).
-    ovrSizei idealSizes[] = {
+    const ovrSizei idealSizes[] = {
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Left, hmdDesc.DefaultEyeFov[ovrEye_Left], 1.0f),
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Right, hmdDesc.DefaultEyeFov[ovrEye_Right], 1.0f)};
-    OculusTexture EyeRenderTexture[] = {{HMD.get(), idealSizes[0]}, {HMD.get(), idealSizes[1]}};
-    DepthBuffer EyeDepthBuffer[] = {{directx.Device, idealSizes[0]},
-                                    {directx.Device, idealSizes[1]}};
-    ovrRecti eyeRenderViewport[] = {{{0, 0}, idealSizes[0]}, {{0, 0}, idealSizes[1]}};
+    OculusTexture eyeRenderTextures[] = {{directx.Device, HMD.get(), idealSizes[ovrEye_Left]},
+                                         {directx.Device, HMD.get(), idealSizes[ovrEye_Right]}};
+    DepthBuffer eyeDepthBuffers[] = {{directx.Device, idealSizes[ovrEye_Left]},
+                                     {directx.Device, idealSizes[ovrEye_Right]}};
+    const ovrRecti eyeRenderViewports[] = {{{0, 0}, idealSizes[ovrEye_Left]},
+                                           {{0, 0}, idealSizes[ovrEye_Right]}};
 
     // Create a mirror to see on the monitor, stash it in a unique_ptr for automatic cleanup.
     auto mirrorTexture =
-        create_unique([&result, hmd = HMD.get() ] {
+        create_unique([&result, hmd = HMD.get(), &directx] {
             CD3D11_TEXTURE2D_DESC td(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, directx.WinSizeW,
                                      directx.WinSizeH, 1, 1);
             ovrTexture* mirrorTexture{};
@@ -686,14 +655,8 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
     VALIDATE(OVR_SUCCESS(result), "Failed to create mirror texture.");
 
     // Initialize the scene
-    auto roomScene = Scene{};
-
+    auto roomScene = Scene{directx.Device, directx.Context};
     auto mainCam = Camera{XMVectorSet(0.0f, 1.6f, 5.0f, 0), XMQuaternionIdentity()};
-
-    ovrEyeRenderDesc eyeRenderDesc[] = {
-        ovr_GetRenderDesc(HMD.get(), ovrEye_Left, hmdDesc.DefaultEyeFov[ovrEye_Left]),
-        ovr_GetRenderDesc(HMD.get(), ovrEye_Right, hmdDesc.DefaultEyeFov[ovrEye_Right])};
-
     auto isVisible = true;
 
     // Main loop
@@ -702,48 +665,52 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
         [&mainCam, &window] {
             const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -0.05f, 0), mainCam.Rot);
             const auto right = XMVector3Rotate(XMVectorSet(0.05f, 0, 0, 0), mainCam.Rot);
-            if (window.Key['W'] || window.Key[VK_UP])
+            if (window.Keys['W'] || window.Keys[VK_UP])
                 mainCam.Pos = XMVectorAdd(mainCam.Pos, forward);
-            if (window.Key['S'] || window.Key[VK_DOWN])
+            if (window.Keys['S'] || window.Keys[VK_DOWN])
                 mainCam.Pos = XMVectorSubtract(mainCam.Pos, forward);
-            if (window.Key['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
-            if (window.Key['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
+            if (window.Keys['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
+            if (window.Keys['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
             static auto Yaw = 0.0f;
-            if (window.Key[VK_LEFT])
+            if (window.Keys[VK_LEFT])
                 mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw += 0.02f, 0);
-            if (window.Key[VK_RIGHT])
+            if (window.Keys[VK_RIGHT])
                 mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw -= 0.02f, 0);
         }();
 
         // Animate the cube
-        [&cube = roomScene.Models[0]] {
+        [& cube = roomScene.Models[0]] {
             static auto cubeClock = 0.0f;
             cube->Pos = XMFLOAT3(9 * sin(cubeClock), 3, 9 * cos(cubeClock += 0.015f));
         }();
 
         // Get both eye poses simultaneously, with IPD offset already included.
-        ovrPosef EyeRenderPose[2] = {};
-        [&EyeRenderPose, hmd = HMD.get(), &eyeRenderDesc ] {
+        const ovrEyeRenderDesc eyeRenderDesc[] = {
+            ovr_GetRenderDesc(HMD.get(), ovrEye_Left, hmdDesc.DefaultEyeFov[ovrEye_Left]),
+            ovr_GetRenderDesc(HMD.get(), ovrEye_Right, hmdDesc.DefaultEyeFov[ovrEye_Right])};
+        const auto eyeRenderPoses = [hmd = HMD.get(), &eyeRenderDesc] {
+            std::array<ovrPosef, 2> res;
             const auto ftiming = ovr_GetFrameTiming(hmd, 0);
             const auto hmdState = ovr_GetTrackingState(hmd, ftiming.DisplayMidpointSeconds);
             const ovrVector3f HmdToEyeViewOffset[] = {
                 eyeRenderDesc[ovrEye_Left].HmdToEyeViewOffset,
                 eyeRenderDesc[ovrEye_Right].HmdToEyeViewOffset};
-            ovr_CalcEyePoses(hmdState.HeadPose.ThePose, HmdToEyeViewOffset, EyeRenderPose);
+            ovr_CalcEyePoses(hmdState.HeadPose.ThePose, HmdToEyeViewOffset, res.data());
+            return res;
         }();
 
         // Render Scene to Eye Buffers
         if (isVisible) {
-            for (int eye = 0; eye < 2; ++eye) {
-                // Increment to use next texture, just before writing
-                const auto texIndex = EyeRenderTexture[eye].AdvanceToNextTexture();
-                directx.SetAndClearRenderTarget(EyeRenderTexture[eye].TexRtv[texIndex],
-                                                &EyeDepthBuffer[eye]);
-                directx.SetViewport(eyeRenderViewport[eye]);
+            for (auto eye : {ovrEye_Left, ovrEye_Right}) {
+                // Increment to use next texture, just before rendering
+                const auto texIndex = eyeRenderTextures[eye].AdvanceToNextTexture();
+                directx.SetAndClearRenderTarget(eyeRenderTextures[eye].TexRtvs[texIndex],
+                                                &eyeDepthBuffers[eye]);
+                directx.SetViewport(eyeRenderViewports[eye]);
 
                 // Get the pose information in XM format
-                const auto eyeQuat = XMLoadFloat4(&XMFLOAT4{&EyeRenderPose[eye].Orientation.x});
-                const auto eyePos = XMLoadFloat3(&XMFLOAT3{&EyeRenderPose[eye].Position.x});
+                const auto eyeQuat = XMLoadFloat4(&XMFLOAT4{&eyeRenderPoses[eye].Orientation.x});
+                const auto eyePos = XMLoadFloat3(&XMFLOAT3{&eyeRenderPoses[eye].Position.x});
 
                 // Get view and projection matrices for the Rift camera
                 const auto CombinedPos =
@@ -755,24 +722,25 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
                 const auto proj = XMMatrixTranspose(XMLoadFloat4x4(&XMFLOAT4X4{&p.M[0][0]}));
 
                 // Render the scene
-                roomScene.Render(XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
+                roomScene.Render(directx, XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
             }
         }
 
         // Initialize our single full screen Fov layer.
-        auto ld = ovrLayerEyeFov{{ovrLayerType_EyeFov, 0}};
-        for (int eye = 0; eye < 2; ++eye) {
-            ld.ColorTexture[eye] = EyeRenderTexture[eye].TextureSet.get();
-            ld.Viewport[eye] = eyeRenderViewport[eye];
-            ld.Fov[eye] = hmdDesc.DefaultEyeFov[eye];
-            ld.RenderPose[eye] = EyeRenderPose[eye];
-        }
-
-        auto layers = &ld.Header;
+        const auto ld = [&eyeRenderTextures, &eyeRenderViewports, &hmdDesc, &eyeRenderPoses] {
+            auto res = ovrLayerEyeFov{{ovrLayerType_EyeFov, 0}};
+            for (auto eye : {ovrEye_Left, ovrEye_Right}) {
+                res.ColorTexture[eye] = eyeRenderTextures[eye].TextureSet.get();
+                res.Viewport[eye] = eyeRenderViewports[eye];
+                res.Fov[eye] = hmdDesc.DefaultEyeFov[eye];
+                res.RenderPose[eye] = eyeRenderPoses[eye];
+            }
+            return res;
+        }();
+        const auto layers = &ld.Header;
         result = ovr_SubmitFrame(HMD.get(), 0, nullptr, &layers, 1);
         // exit the rendering loop if submit returns an error, will retry on ovrError_DisplayLost
         if (!OVR_SUCCESS(result)) return retryCreate;
-
         isVisible = result == ovrSuccess;
 
         // Render mirror
@@ -783,7 +751,7 @@ static bool MainLoop(const WindowClass& window, bool retryCreate) {
     }
 
     // Retry on ovrError_DisplayLost
-    return retryCreate || OVR_SUCCESS(result) || (result == ovrError_DisplayLost);
+    return retryCreate || !window.Running || result == ovrError_DisplayLost;
 }
 
 //-------------------------------------------------------------------------------------
@@ -792,9 +760,7 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE, LPSTR, int) {
     auto result = ovr_Initialize(nullptr);
     VALIDATE(OVR_SUCCESS(result), "Failed to initialize libOVR.");
 
-    WindowClass window;
-    VALIDATE(window.InitWindow(hinst, L"Oculus Room Tiny (DX11)"), "Failed to open window.");
-
+    Window window{hinst, L"Oculus Room Tiny (DX11)"};
     window.Run(MainLoop);
 
     ovr_Shutdown();
