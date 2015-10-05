@@ -53,6 +53,7 @@ using namespace DirectX;
     }
 #endif
 
+// Define _com_ptr_t COM smart pointer typedefs for all the D3D and DXGI interfaces we use
 #define COM_SMARTPTR_TYPEDEF(x) _COM_SMARTPTR_TYPEDEF(x, __uuidof(x))
 COM_SMARTPTR_TYPEDEF(ID3D11BlendState);
 COM_SMARTPTR_TYPEDEF(ID3D11Buffer);
@@ -73,19 +74,6 @@ COM_SMARTPTR_TYPEDEF(IDXGIAdapter);
 COM_SMARTPTR_TYPEDEF(IDXGIDevice1);
 COM_SMARTPTR_TYPEDEF(IDXGIFactory);
 COM_SMARTPTR_TYPEDEF(IDXGISwapChain);
-
-struct DepthBuffer {
-    ID3D11DepthStencilViewPtr TexDsv;
-
-    DepthBuffer(ID3D11Device* Device, ovrSizei size) {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h);
-        dsDesc.MipLevels = 1;
-        dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        ID3D11Texture2DPtr Tex;
-        Device->CreateTexture2D(&dsDesc, NULL, &Tex);
-        Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
-    }
-};
 
 struct Window {
     HWND Hwnd = nullptr;
@@ -149,6 +137,19 @@ struct Window {
     }
 };
 
+struct DepthBuffer {
+    ID3D11DepthStencilViewPtr TexDsv;
+
+    DepthBuffer(ID3D11Device* Device, ovrSizei size) {
+        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h);
+        dsDesc.MipLevels = 1;
+        dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ID3D11Texture2DPtr Tex;
+        Device->CreateTexture2D(&dsDesc, NULL, &Tex);
+        Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
+    }
+};
+
 struct DirectX11 {
     int WinSizeW = 0;
     int WinSizeH = 0;
@@ -182,9 +183,8 @@ struct DirectX11 {
 enum class TextureFill { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING };
 
 auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFill texFill) {
-    const int w{256}, h{256}, mips{8};
-    CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_R8G8B8A8_UNORM, w, h, 1, mips,
-                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    auto dsDesc = CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM, 256, 256, 1, 8,
+                                        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
     dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
     ID3D11Texture2DPtr tex;
@@ -193,10 +193,10 @@ auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFi
     device->CreateShaderResourceView(tex, nullptr, &texSrv);
 
     // Fill texture with requested pattern
-    std::vector<DWORD> pix(w * h);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            auto& curr = pix[y * w + x];
+    std::vector<DWORD> pix(dsDesc.Width * dsDesc.Height);
+    for (auto y = 0u; y < dsDesc.Height; ++y)
+        for (auto x = 0u; x < dsDesc.Width; ++x) {
+            auto& curr = pix[y * dsDesc.Width + x];
             switch (texFill) {
                 case (TextureFill::AUTO_WALL):
                     curr =
@@ -219,7 +219,7 @@ auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFi
                     break;
             }
         }
-    context->UpdateSubresource(tex, 0, nullptr, pix.data(), w * 4, 0);
+    context->UpdateSubresource(tex, 0, nullptr, pix.data(), dsDesc.Width * 4, 0);
     context->GenerateMips(texSrv);
 
     return texSrv;
@@ -303,15 +303,15 @@ struct Model {
     Model(ID3D11Device* device, const TriangleSet& t, XMFLOAT3 argPos, XMFLOAT4 argRot,
           ID3D11ShaderResourceView* tex)
         : Pos(argPos), Rot(argRot), Tex(tex), NumIndices{size(t.Indices)} {
-        CD3D11_BUFFER_DESC vbDesc(size(t.Vertices) * sizeof(t.Vertices.back()),
-                                  D3D11_BIND_VERTEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA vbData{t.Vertices.data(), 0, 0};
-        device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
+        device->CreateBuffer(
+            std::begin({CD3D11_BUFFER_DESC{UINT(size(t.Vertices) * sizeof(t.Vertices.back())),
+                                           D3D11_BIND_VERTEX_BUFFER}}),
+            std::begin({D3D11_SUBRESOURCE_DATA{t.Vertices.data(), 0, 0}}), &VertexBuffer);
 
-        CD3D11_BUFFER_DESC ibDesc(size(t.Indices) * sizeof(t.Indices.back()),
-                                  D3D11_BIND_INDEX_BUFFER);
-        D3D11_SUBRESOURCE_DATA ibData{t.Indices.data(), 0, 0};
-        device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
+        device->CreateBuffer(
+            std::begin({CD3D11_BUFFER_DESC{UINT(size(t.Indices) * sizeof(t.Indices.back())),
+                                           D3D11_BIND_INDEX_BUFFER}}),
+            std::begin({D3D11_SUBRESOURCE_DATA{t.Indices.data(), 0, 0}}), &IndexBuffer);
     }
 
     void Render(DirectX11& directx, const XMMATRIX& projView) const {
@@ -327,7 +327,8 @@ struct Model {
         directx.Context->IASetInputLayout(directx.InputLayout);
         directx.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
         const auto vbs = {VertexBuffer.GetInterfacePtr()};
-        directx.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({sizeof(Vertex)}),
+        directx.Context->IASetVertexBuffers(0, UINT(size(vbs)), begin(vbs),
+                                            std::begin({UINT(sizeof(Vertex))}),
                                             std::begin({UINT(0)}));
         directx.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -335,11 +336,11 @@ struct Model {
         directx.Context->PSSetShader(directx.D3DPix, nullptr, 0);
 
         const auto samplerStates = {directx.SamplerState.GetInterfacePtr()};
-        directx.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
+        directx.Context->PSSetSamplers(0, UINT(size(samplerStates)), begin(samplerStates));
 
         const auto texSrvs = {Tex.GetInterfacePtr()};
-        directx.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
-        directx.Context->DrawIndexed(NumIndices, 0, 0);
+        directx.Context->PSSetShaderResources(0, UINT(size(texSrvs)), begin(texSrvs));
+        directx.Context->DrawIndexed(UINT(NumIndices), 0, 0);
     }
 };
 
@@ -470,9 +471,9 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
     auto windowSize = RECT{0, 0, WinSizeW, WinSizeH};
     AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
     const auto flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
-    if (!SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
-                      windowSize.bottom - windowSize.top, flags))
-        VALIDATE(false, "SetWindowPos() failed.");
+    VALIDATE(SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
+                          windowSize.bottom - windowSize.top, flags),
+             "SetWindowPos() failed.");
 
     IDXGIFactoryPtr dxgiFactory;
     auto hr = CreateDXGIFactory1(dxgiFactory.GetIID(), reinterpret_cast<void**>(&dxgiFactory));
@@ -519,7 +520,7 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
                                          D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
     Device->CreateBuffer(&uniformBufferDesc, nullptr, &ConstantBuffer);
     auto buffs = {ConstantBuffer.GetInterfacePtr()};
-    Context->VSSetConstantBuffers(0, size(buffs), begin(buffs));
+    Context->VSSetConstantBuffers(0, UINT(size(buffs)), begin(buffs));
 
     // Set max frame latency to 1
     IDXGIDevice1Ptr DXGIDevice1;
@@ -537,12 +538,12 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
 
     // Create and set depth stencil state
     ID3D11DepthStencilStatePtr dss;
-    Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT}, &dss);
+    Device->CreateDepthStencilState(std::begin({CD3D11_DEPTH_STENCIL_DESC{D3D11_DEFAULT}}), &dss);
     Context->OMSetDepthStencilState(dss, 0);
 
     // Create and set blend state
     ID3D11BlendStatePtr bs;
-    Device->CreateBlendState(&CD3D11_BLEND_DESC{D3D11_DEFAULT}, &bs);
+    Device->CreateBlendState(std::begin({CD3D11_BLEND_DESC{D3D11_DEFAULT}}), &bs);
     Context->OMSetBlendState(bs, nullptr, 0xffffffff);
 
     auto compileShader = [](const char* src, const char* target) {
@@ -572,7 +573,7 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
         {"Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    Device->CreateInputLayout(defaultVertexDesc, std::size(defaultVertexDesc),
+    Device->CreateInputLayout(defaultVertexDesc, UINT(std::size(defaultVertexDesc)),
                               vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &InputLayout);
 
     // Create pixel shader
@@ -709,8 +710,10 @@ static bool MainLoop(const Window& window, bool retryCreate) {
                 directx.SetViewport(eyeRenderViewports[eye]);
 
                 // Get the pose information in XM format
-                const auto eyeQuat = XMLoadFloat4(&XMFLOAT4{&eyeRenderPoses[eye].Orientation.x});
-                const auto eyePos = XMLoadFloat3(&XMFLOAT3{&eyeRenderPoses[eye].Position.x});
+                const auto eyeQuat =
+                    XMLoadFloat4(std::begin({XMFLOAT4{&eyeRenderPoses[eye].Orientation.x}}));
+                const auto eyePos =
+                    XMLoadFloat3(std::begin({XMFLOAT3{&eyeRenderPoses[eye].Position.x}}));
 
                 // Get view and projection matrices for the Rift camera
                 const auto CombinedPos =
@@ -719,7 +722,8 @@ static bool MainLoop(const Window& window, bool retryCreate) {
                     Camera{CombinedPos, XMQuaternionMultiply(eyeQuat, mainCam.Rot)};
                 const auto p = ovrMatrix4f_Projection(eyeRenderDesc[eye].Fov, 0.2f, 1000.0f,
                                                       ovrProjection_RightHanded);
-                const auto proj = XMMatrixTranspose(XMLoadFloat4x4(&XMFLOAT4X4{&p.M[0][0]}));
+                const auto proj =
+                    XMMatrixTranspose(XMLoadFloat4x4(std::begin({XMFLOAT4X4{&p.M[0][0]}})));
 
                 // Render the scene
                 roomScene.Render(directx, XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
