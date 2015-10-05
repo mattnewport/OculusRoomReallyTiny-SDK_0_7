@@ -91,29 +91,14 @@ struct DepthBuffer {
     }
 };
 
-struct DirectX11 {
+struct WindowClass {
     HWND Window = nullptr;
     bool Running = false;
     bool Key[256] = {};
-    int WinSizeW = 0;
-    int WinSizeH = 0;
-    ID3D11DevicePtr Device;
-    ID3D11DeviceContextPtr Context;
-    IDXGISwapChainPtr SwapChain;
-    ID3D11Texture2DPtr BackBuffer;
-    ID3D11RenderTargetViewPtr BackBufferRT;
-    ID3D11VertexShaderPtr D3DVert;
-    ID3D11PixelShaderPtr D3DPix;
-    ID3D11InputLayoutPtr InputLayout;
-    ID3D11SamplerStatePtr SamplerState;
-    // Fixed size buffer for shader constants, before copied into buffer
-    std::uint8_t UniformData[1024];
-    ID3D11BufferPtr UniformBufferGen;
-    HINSTANCE hInstance = nullptr;
 
     static LRESULT CALLBACK WindowProc(_In_ HWND hWnd, _In_ UINT Msg, _In_ WPARAM wParam,
         _In_ LPARAM lParam) {
-        auto p = reinterpret_cast<DirectX11*>(GetWindowLongPtr(hWnd, 0));
+        auto p = reinterpret_cast<WindowClass*>(GetWindowLongPtr(hWnd, 0));
         switch (Msg) {
         case WM_KEYDOWN:
             p->Key[wParam] = true;
@@ -133,15 +118,7 @@ struct DirectX11 {
         return 0;
     }
 
-    ~DirectX11() {
-        if (Window) {
-            DestroyWindow(Window);
-            UnregisterClassW(L"App", hInstance);
-        }
-    }
-
     auto InitWindow(HINSTANCE hinst, LPCWSTR title) {
-        hInstance = hinst;
         Running = true;
 
         WNDCLASSW wc{};
@@ -161,156 +138,44 @@ struct DirectX11 {
         return true;
     }
 
-    auto InitDevice(int vpW, int vpH, const LUID* pLuid, bool windowed = true) {
-        WinSizeW = vpW;
-        WinSizeH = vpH;
-
-        auto windowSize = RECT{ 0, 0, vpW, vpH };
-        AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
-        const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
-        if (!SetWindowPos(Window, nullptr, 0, 0, windowSize.right - windowSize.left,
-            windowSize.bottom - windowSize.top, flags))
-            return false;
-
-        IDXGIFactoryPtr DXGIFactory;
-        auto hr = CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
-        VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
-
-        IDXGIAdapterPtr Adapter;
-        for (UINT iAdapter = 0;
-        DXGIFactory->EnumAdapters(iAdapter, &Adapter) != DXGI_ERROR_NOT_FOUND; ++iAdapter) {
-            DXGI_ADAPTER_DESC adapterDesc;
-            Adapter->GetDesc(&adapterDesc);
-            if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0)
-                break;
+    auto HandleMessages() const {
+        MSG msg{};
+        while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
         }
-
-        const D3D11_CREATE_DEVICE_FLAG createFlags = [] {
-#ifdef _DEBUG
-            return D3D11_CREATE_DEVICE_DEBUG;
-#else
-            return 0;
-#endif
-        }();
-        auto DriverType = Adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
-        hr = D3D11CreateDevice(Adapter, DriverType, 0, createFlags, nullptr, 0, D3D11_SDK_VERSION,
-            &Device, nullptr, &Context);
-        VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
-
-        // Create swap chain
-        DXGI_SWAP_CHAIN_DESC scDesc{};
-        scDesc.BufferCount = 2;
-        scDesc.BufferDesc.Width = WinSizeW;
-        scDesc.BufferDesc.Height = WinSizeH;
-        scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        scDesc.BufferDesc.RefreshRate.Denominator = 1;
-        scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        scDesc.OutputWindow = Window;
-        scDesc.SampleDesc.Count = 1;
-        scDesc.Windowed = windowed;
-        scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
-        hr = DXGIFactory->CreateSwapChain(Device, &scDesc, &SwapChain);
-        VALIDATE((hr == ERROR_SUCCESS), "CreateSwapChain failed");
-
-        // Create backbuffer
-        SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
-        hr = Device->CreateRenderTargetView(BackBuffer, nullptr, &BackBufferRT);
-        VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
-
-        auto rts = { BackBufferRT.GetInterfacePtr() };
-        Context->OMSetRenderTargets(size(rts), begin(rts), nullptr);
-
-        // Buffer for shader constants
-        CD3D11_BUFFER_DESC uniformBufferDesc(std::size(UniformData), D3D11_BIND_CONSTANT_BUFFER,
-            D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-        Device->CreateBuffer(&uniformBufferDesc, nullptr, &UniformBufferGen);
-        auto buffs = { UniformBufferGen.GetInterfacePtr() };
-        Context->VSSetConstantBuffers(0, size(buffs), begin(buffs));
-
-        // Set max frame latency to 1
-        IDXGIDevice1Ptr DXGIDevice1;
-        hr = Device.QueryInterface(DXGIDevice1.GetIID(), &DXGIDevice1);
-        VALIDATE((hr == ERROR_SUCCESS), "QueryInterface failed");
-        DXGIDevice1->SetMaximumFrameLatency(1);
-
-        // Set up render states
-        // Create and set rasterizer state
-        CD3D11_RASTERIZER_DESC rs{ D3D11_DEFAULT };
-        rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
-        ID3D11RasterizerStatePtr rss;
-        Device->CreateRasterizerState(&rs, &rss);
-        Context->RSSetState(rss);
-
-        // Create and set depth stencil state
-        ID3D11DepthStencilStatePtr dss;
-        Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{ D3D11_DEFAULT }, &dss);
-        Context->OMSetDepthStencilState(dss, 0);
-
-        // Create and set blend state
-        CD3D11_BLEND_DESC bm{ D3D11_DEFAULT };
-        bm.RenderTarget[0].BlendEnable = TRUE;
-        bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
-        bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
-            D3D11_BLEND_INV_SRC_ALPHA;
-        ID3D11BlendStatePtr bs;
-        Device->CreateBlendState(&bm, &bs);
-        Context->OMSetBlendState(bs, nullptr, 0xffffffff);
-
-        auto compileShader = [](const char* src, const char* target) {
-            ID3DBlobPtr blob;
-            D3DCompile(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target, 0, 0,
-                &blob, nullptr);
-            return blob;
-        };
-
-        // Create vertex shader and input layout
-        auto defaultVertexShaderSrc = R"(float4x4 ProjView;
-                                         void main(in float4 pos : POSITION,
-                                                   in float4 col : COLOR0,
-                                                   in float2 tex : TEXCOORD0,
-                                                   out float4 oPos : SV_Position,
-                                                   out float4 oCol : COLOR0,
-                                                   out float2 oTex : TEXCOORD0) {
-                                             oPos = mul(ProjView, pos);
-                                             oTex = tex;
-                                             oCol = col;
-                                         })";
-        ID3DBlobPtr vsBlob = compileShader(defaultVertexShaderSrc, "vs_4_0");
-        Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
-            nullptr, &D3DVert);
-        D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
-            { "Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-            { "Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-            { "TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        };
-        Device->CreateInputLayout(defaultVertexDesc, std::size(defaultVertexDesc),
-            vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
-            &InputLayout);
-
-        // Create pixel shader
-        auto defaultPixelShaderSrc = R"(Texture2D Texture : register(t0);
-                                        SamplerState Linear : register(s0);
-                                        float4 main(in float4 Position : SV_Position,
-                                                    in float4 Color: COLOR0,
-                                                    in float2  TexCoord : TEXCOORD0) : SV_Target {
-                                            float4 TexCol = Texture.Sample(Linear, TexCoord);
-                                            if (TexCol.a==0) clip(-1); // If alpha = 0, don't draw
-                                            return(Color * TexCol);
-                                        })";
-        auto psBlob = compileShader(defaultPixelShaderSrc, "ps_4_0");
-        Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
-            nullptr, &D3DPix);
-
-        // Create sampler state
-        CD3D11_SAMPLER_DESC ss{ D3D11_DEFAULT };
-        ss.Filter = D3D11_FILTER_ANISOTROPIC;
-        ss.AddressU = ss.AddressV = ss.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-        ss.MaxAnisotropy = 8;
-        ss.MaxLOD = 15;
-        Device->CreateSamplerState(&ss, &SamplerState);
-
-        return true;
+        return Running;
     }
+
+    void Run(bool(*MainLoop)(const WindowClass& window, bool retryCreate)) const {
+        // false => just fail on any error
+        VALIDATE(MainLoop(*this, false), "Oculus Rift not detected.");
+        while (HandleMessages()) {
+            // true => we'll attempt to retry for ovrError_DisplayLost
+            if (!MainLoop(*this, true)) break;
+            // Sleep a bit before retrying to reduce CPU load while the HMD is disconnected
+            Sleep(10);
+        }
+    }
+};
+
+struct DirectX11 {
+    int WinSizeW = 0;
+    int WinSizeH = 0;
+    ID3D11DevicePtr Device;
+    ID3D11DeviceContextPtr Context;
+    IDXGISwapChainPtr SwapChain;
+    ID3D11Texture2DPtr BackBuffer;
+    ID3D11RenderTargetViewPtr BackBufferRT;
+    ID3D11VertexShaderPtr D3DVert;
+    ID3D11PixelShaderPtr D3DPix;
+    ID3D11InputLayoutPtr InputLayout;
+    ID3D11SamplerStatePtr SamplerState;
+    // Fixed size buffer for shader constants, before copied into buffer
+    std::uint8_t UniformData[1024];
+    ID3D11BufferPtr UniformBufferGen;
+
+    bool InitDevice(HWND window, int vpW, int vpH, const LUID* pLuid);
 
     void SetAndClearRenderTarget(ID3D11RenderTargetView* rendertarget,
         DepthBuffer* depthbuffer) const {
@@ -325,39 +190,12 @@ struct DirectX11 {
             float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w), float(vp.Size.h), 0.0f, 1.0f };
         Context->RSSetViewports(1, &D3Dvp);
     }
-
-    auto HandleMessages() const {
-        MSG msg{};
-        while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        return Running;
-    }
-
-    void Run(bool(*MainLoop)(bool retryCreate)) const {
-        // false => just fail on any error
-        VALIDATE(MainLoop(false), "Oculus Rift not detected.");
-        while (HandleMessages()) {
-            // true => we'll attempt to retry for ovrError_DisplayLost
-            if (!MainLoop(true)) break;
-            // Sleep a bit before retrying to reduce CPU load while the HMD is disconnected
-            Sleep(10);
-        }
-    }
 };
 
 // global DX11 state
-static DirectX11 DIRECTX;
+static DirectX11 directx;
 
-enum class TextureFill {
-    AUTO_WHITE,
-    AUTO_WALL,
-    AUTO_FLOOR,
-    AUTO_CEILING,
-    AUTO_GRID,
-    AUTO_GRADE_256
-};
+enum class TextureFill { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING };
 
 auto createTexture(TextureFill texFill) {
     const int SizeW{ 256 }, SizeH{ 256 }, MipLevels{ 8 };
@@ -366,9 +204,9 @@ auto createTexture(TextureFill texFill) {
     dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
     ID3D11Texture2DPtr Tex;
-    DIRECTX.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
+    directx.Device->CreateTexture2D(&dsDesc, nullptr, &Tex);
     ID3D11ShaderResourceViewPtr TexSv;
-    DIRECTX.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
+    directx.Device->CreateShaderResourceView(Tex, nullptr, &TexSv);
 
     // Fill texture with requested pattern
     std::vector<DWORD> pix(SizeW * SizeH);
@@ -392,21 +230,13 @@ auto createTexture(TextureFill texFill) {
             case (TextureFill::AUTO_WHITE) :
                 curr = 0xffffffff;
                 break;
-            case (TextureFill::AUTO_GRADE_256) :
-                curr = 0xff000000 + i * 0x010101;
-                break;
-            case (TextureFill::AUTO_GRID) :
-                curr = (i < 4) || (i >(SizeW - 5)) || (j < 4) || (j >(SizeH - 5))
-                ? 0xffffffff
-                : 0xff000000;
-                break;
             default:
                 curr = 0xffffffff;
                 break;
             }
         }
-    DIRECTX.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
-    DIRECTX.Context->GenerateMips(TexSv);
+    directx.Context->UpdateSubresource(Tex, 0, nullptr, pix.data(), SizeW * 4, 0);
+    directx.Context->GenerateMips(TexSv);
 
     return TexSv;
 }
@@ -491,41 +321,41 @@ struct Model {
         CD3D11_BUFFER_DESC vbDesc(size(t.Vertices) * sizeof(t.Vertices.back()),
             D3D11_BIND_VERTEX_BUFFER);
         D3D11_SUBRESOURCE_DATA vbData{ t.Vertices.data(), 0, 0 };
-        DIRECTX.Device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
+        directx.Device->CreateBuffer(&vbDesc, &vbData, &VertexBuffer);
 
         CD3D11_BUFFER_DESC ibDesc(size(t.Indices) * sizeof(t.Indices.back()),
             D3D11_BIND_INDEX_BUFFER);
         D3D11_SUBRESOURCE_DATA ibData{ t.Indices.data(), 0, 0 };
-        DIRECTX.Device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
+        directx.Device->CreateBuffer(&ibDesc, &ibData, &IndexBuffer);
     }
 
     void Render(const XMMATRIX& projView) const {
         const auto modelMat = XMMatrixMultiply(XMMatrixRotationQuaternion(XMLoadFloat4(&Rot)),
             XMMatrixTranslationFromVector(XMLoadFloat3(&Pos)));
         const auto mat = XMMatrixMultiply(modelMat, projView);
-        memcpy(DIRECTX.UniformData, &mat, sizeof(mat));  // ProjView
+        memcpy(directx.UniformData, &mat, sizeof(mat));  // ProjView
 
         D3D11_MAPPED_SUBRESOURCE map{};
-        DIRECTX.Context->Map(DIRECTX.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-        memcpy(map.pData, &DIRECTX.UniformData, std::size(DIRECTX.UniformData));
-        DIRECTX.Context->Unmap(DIRECTX.UniformBufferGen, 0);
+        directx.Context->Map(directx.UniformBufferGen, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+        memcpy(map.pData, &directx.UniformData, std::size(directx.UniformData));
+        directx.Context->Unmap(directx.UniformBufferGen, 0);
 
-        DIRECTX.Context->IASetInputLayout(DIRECTX.InputLayout);
-        DIRECTX.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+        directx.Context->IASetInputLayout(directx.InputLayout);
+        directx.Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
         const auto vbs = { VertexBuffer.GetInterfacePtr() };
-        DIRECTX.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({ sizeof(Vertex) }),
+        directx.Context->IASetVertexBuffers(0, size(vbs), begin(vbs), std::begin({ sizeof(Vertex) }),
             std::begin({ UINT(0) }));
-        DIRECTX.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        directx.Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        DIRECTX.Context->VSSetShader(DIRECTX.D3DVert, nullptr, 0);
-        DIRECTX.Context->PSSetShader(DIRECTX.D3DPix, nullptr, 0);
+        directx.Context->VSSetShader(directx.D3DVert, nullptr, 0);
+        directx.Context->PSSetShader(directx.D3DPix, nullptr, 0);
 
-        const auto samplerStates = { DIRECTX.SamplerState.GetInterfacePtr() };
-        DIRECTX.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
+        const auto samplerStates = { directx.SamplerState.GetInterfacePtr() };
+        directx.Context->PSSetSamplers(0, size(samplerStates), begin(samplerStates));
 
         const auto texSrvs = { Tex.GetInterfacePtr() };
-        DIRECTX.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
-        DIRECTX.Context->DrawIndexed(NumIndices, 0, 0);
+        directx.Context->PSSetShaderResources(0, size(texSrvs), begin(texSrvs));
+        directx.Context->DrawIndexed(NumIndices, 0, 0);
     }
 };
 
@@ -624,7 +454,7 @@ struct OculusTexture {
 
                          ovrSwapTextureSet* ts{};
                          auto result = ovr_CreateSwapTextureSetD3D11(
-                             hmd, DIRECTX.Device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
+                             hmd, directx.Device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
                          VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
                          VALIDATE(ts->TextureCount == std::size(texRtv), "TextureCount mismatch.");
                          return ts;
@@ -637,7 +467,7 @@ struct OculusTexture {
                            CD3D11_RENDER_TARGET_VIEW_DESC rtvd(D3D11_RTV_DIMENSION_TEXTURE2D,
                                                                DXGI_FORMAT_R8G8B8A8_UNORM);
                            ID3D11RenderTargetViewPtr rtv;
-                           DIRECTX.Device->CreateRenderTargetView(
+                           directx.Device->CreateRenderTargetView(
                                reinterpret_cast<ovrD3D11Texture&>(tex).D3D11.pTexture, &rtvd, &rtv);
                            return rtv;
                        });
@@ -648,6 +478,157 @@ struct OculusTexture {
     }
 };
 
+bool DirectX11::InitDevice(HWND window, int vpW, int vpH, const LUID * pLuid) {
+    WinSizeW = vpW;
+    WinSizeH = vpH;
+
+    auto windowSize = RECT{ 0, 0, vpW, vpH };
+    AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
+    const UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
+    if (!SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
+        windowSize.bottom - windowSize.top, flags))
+        return false;
+
+    IDXGIFactoryPtr DXGIFactory;
+    auto hr = CreateDXGIFactory1(DXGIFactory.GetIID(), reinterpret_cast<void**>(&DXGIFactory));
+    VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
+
+    IDXGIAdapterPtr Adapter;
+    for (UINT iAdapter = 0;
+    DXGIFactory->EnumAdapters(iAdapter, &Adapter) != DXGI_ERROR_NOT_FOUND; ++iAdapter) {
+        DXGI_ADAPTER_DESC adapterDesc;
+        Adapter->GetDesc(&adapterDesc);
+        if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0)
+            break;
+    }
+
+    const D3D11_CREATE_DEVICE_FLAG createFlags = [] {
+#ifdef _DEBUG
+        return D3D11_CREATE_DEVICE_DEBUG;
+#else
+        return 0;
+#endif
+    }();
+    auto DriverType = Adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+    hr = D3D11CreateDevice(Adapter, DriverType, 0, createFlags, nullptr, 0, D3D11_SDK_VERSION,
+        &Device, nullptr, &Context);
+    VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
+
+    // Create swap chain
+    DXGI_SWAP_CHAIN_DESC scDesc{};
+    scDesc.BufferCount = 2;
+    scDesc.BufferDesc.Width = WinSizeW;
+    scDesc.BufferDesc.Height = WinSizeH;
+    scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scDesc.BufferDesc.RefreshRate.Denominator = 1;
+    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scDesc.OutputWindow = window;
+    scDesc.SampleDesc.Count = 1;
+    scDesc.Windowed = TRUE;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
+    hr = DXGIFactory->CreateSwapChain(Device, &scDesc, &SwapChain);
+    VALIDATE((hr == ERROR_SUCCESS), "CreateSwapChain failed");
+
+    // Create backbuffer
+    SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
+    hr = Device->CreateRenderTargetView(BackBuffer, nullptr, &BackBufferRT);
+    VALIDATE((hr == ERROR_SUCCESS), "CreateRenderTargetView failed");
+
+    auto rts = { BackBufferRT.GetInterfacePtr() };
+    Context->OMSetRenderTargets(size(rts), begin(rts), nullptr);
+
+    // Buffer for shader constants
+    CD3D11_BUFFER_DESC uniformBufferDesc(std::size(UniformData), D3D11_BIND_CONSTANT_BUFFER,
+        D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+    Device->CreateBuffer(&uniformBufferDesc, nullptr, &UniformBufferGen);
+    auto buffs = { UniformBufferGen.GetInterfacePtr() };
+    Context->VSSetConstantBuffers(0, size(buffs), begin(buffs));
+
+    // Set max frame latency to 1
+    IDXGIDevice1Ptr DXGIDevice1;
+    hr = Device.QueryInterface(DXGIDevice1.GetIID(), &DXGIDevice1);
+    VALIDATE((hr == ERROR_SUCCESS), "QueryInterface failed");
+    DXGIDevice1->SetMaximumFrameLatency(1);
+
+    // Set up render states
+    // Create and set rasterizer state
+    CD3D11_RASTERIZER_DESC rs{ D3D11_DEFAULT };
+    rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
+    ID3D11RasterizerStatePtr rss;
+    Device->CreateRasterizerState(&rs, &rss);
+    Context->RSSetState(rss);
+
+    // Create and set depth stencil state
+    ID3D11DepthStencilStatePtr dss;
+    Device->CreateDepthStencilState(&CD3D11_DEPTH_STENCIL_DESC{ D3D11_DEFAULT }, &dss);
+    Context->OMSetDepthStencilState(dss, 0);
+
+    // Create and set blend state
+    CD3D11_BLEND_DESC bm{ D3D11_DEFAULT };
+    bm.RenderTarget[0].BlendEnable = TRUE;
+    bm.RenderTarget[0].SrcBlend = bm.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+    bm.RenderTarget[0].DestBlend = bm.RenderTarget[0].DestBlendAlpha =
+        D3D11_BLEND_INV_SRC_ALPHA;
+    ID3D11BlendStatePtr bs;
+    Device->CreateBlendState(&bm, &bs);
+    Context->OMSetBlendState(bs, nullptr, 0xffffffff);
+
+    auto compileShader = [](const char* src, const char* target) {
+        ID3DBlobPtr blob;
+        D3DCompile(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target, 0, 0,
+            &blob, nullptr);
+        return blob;
+    };
+
+    // Create vertex shader and input layout
+    auto defaultVertexShaderSrc = R"(float4x4 ProjView;
+                                         void main(in float4 pos : POSITION,
+                                                   in float4 col : COLOR0,
+                                                   in float2 tex : TEXCOORD0,
+                                                   out float4 oPos : SV_Position,
+                                                   out float4 oCol : COLOR0,
+                                                   out float2 oTex : TEXCOORD0) {
+                                             oPos = mul(ProjView, pos);
+                                             oTex = tex;
+                                             oCol = col;
+                                         })";
+    ID3DBlobPtr vsBlob = compileShader(defaultVertexShaderSrc, "vs_4_0");
+    Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+        nullptr, &D3DVert);
+    D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
+        { "Position", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "Color", 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TexCoord", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    Device->CreateInputLayout(defaultVertexDesc, std::size(defaultVertexDesc),
+        vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+        &InputLayout);
+
+    // Create pixel shader
+    auto defaultPixelShaderSrc = R"(Texture2D Texture : register(t0);
+                                        SamplerState Linear : register(s0);
+                                        float4 main(in float4 Position : SV_Position,
+                                                    in float4 Color: COLOR0,
+                                                    in float2  TexCoord : TEXCOORD0) : SV_Target {
+                                            float4 TexCol = Texture.Sample(Linear, TexCoord);
+                                            if (TexCol.a==0) clip(-1); // If alpha = 0, don't draw
+                                            return(Color * TexCol);
+                                        })";
+    auto psBlob = compileShader(defaultPixelShaderSrc, "ps_4_0");
+    Device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
+        nullptr, &D3DPix);
+
+    // Create sampler state
+    CD3D11_SAMPLER_DESC ss{ D3D11_DEFAULT };
+    ss.Filter = D3D11_FILTER_ANISOTROPIC;
+    ss.AddressU = ss.AddressV = ss.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    ss.MaxAnisotropy = 8;
+    ss.MaxLOD = 15;
+    Device->CreateSamplerState(&ss, &SamplerState);
+
+    return true;
+}
+
 // Helper to wrap ovr types like ovrHmd and ovrTexture* in a unique_ptr with custom create / destroy
 template <typename CreateFunc, typename DestroyFunc>
 auto create_unique(CreateFunc createFunc, DestroyFunc destroyFunc) {
@@ -656,7 +637,7 @@ auto create_unique(CreateFunc createFunc, DestroyFunc destroyFunc) {
 }
 
 // return true to retry later (e.g. after display lost)
-static bool MainLoop(bool retryCreate) {
+static bool MainLoop(const WindowClass& window, bool retryCreate) {
     auto result = ovrResult{};
     auto luid = ovrGraphicsLuid{};
     // Initialize the HMD, stash it in a unique_ptr for automatic cleanup.
@@ -673,7 +654,7 @@ static bool MainLoop(bool retryCreate) {
 
     // Setup Device and Graphics
     // Note: the mirror window can be any size, for this sample we use 1/2 the HMD resolution
-    if (!DIRECTX.InitDevice(hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
+    if (!directx.InitDevice(window.Window, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
                             reinterpret_cast<LUID*>(&luid)))
         return retryCreate;
 
@@ -688,17 +669,17 @@ static bool MainLoop(bool retryCreate) {
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Left, hmdDesc.DefaultEyeFov[ovrEye_Left], 1.0f),
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Right, hmdDesc.DefaultEyeFov[ovrEye_Right], 1.0f)};
     OculusTexture EyeRenderTexture[] = {{HMD.get(), idealSizes[0]}, {HMD.get(), idealSizes[1]}};
-    DepthBuffer EyeDepthBuffer[] = {{DIRECTX.Device, idealSizes[0]},
-                                    {DIRECTX.Device, idealSizes[1]}};
+    DepthBuffer EyeDepthBuffer[] = {{directx.Device, idealSizes[0]},
+                                    {directx.Device, idealSizes[1]}};
     ovrRecti eyeRenderViewport[] = {{{0, 0}, idealSizes[0]}, {{0, 0}, idealSizes[1]}};
 
     // Create a mirror to see on the monitor, stash it in a unique_ptr for automatic cleanup.
     auto mirrorTexture =
         create_unique([&result, hmd = HMD.get() ] {
-            CD3D11_TEXTURE2D_DESC td(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DIRECTX.WinSizeW,
-                                     DIRECTX.WinSizeH, 1, 1);
+            CD3D11_TEXTURE2D_DESC td(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, directx.WinSizeW,
+                                     directx.WinSizeH, 1, 1);
             ovrTexture* mirrorTexture{};
-            result = ovr_CreateMirrorTextureD3D11(hmd, DIRECTX.Device, &td, 0, &mirrorTexture);
+            result = ovr_CreateMirrorTextureD3D11(hmd, directx.Device, &td, 0, &mirrorTexture);
             return mirrorTexture;
         },
                       [hmd = HMD.get()](ovrTexture * mt) { ovr_DestroyMirrorTexture(hmd, mt); });
@@ -716,21 +697,21 @@ static bool MainLoop(bool retryCreate) {
     auto isVisible = true;
 
     // Main loop
-    while (DIRECTX.HandleMessages()) {
+    while (window.HandleMessages()) {
         // Handle input
-        [&mainCam] {
+        [&mainCam, &window] {
             const auto forward = XMVector3Rotate(XMVectorSet(0, 0, -0.05f, 0), mainCam.Rot);
             const auto right = XMVector3Rotate(XMVectorSet(0.05f, 0, 0, 0), mainCam.Rot);
-            if (DIRECTX.Key['W'] || DIRECTX.Key[VK_UP])
+            if (window.Key['W'] || window.Key[VK_UP])
                 mainCam.Pos = XMVectorAdd(mainCam.Pos, forward);
-            if (DIRECTX.Key['S'] || DIRECTX.Key[VK_DOWN])
+            if (window.Key['S'] || window.Key[VK_DOWN])
                 mainCam.Pos = XMVectorSubtract(mainCam.Pos, forward);
-            if (DIRECTX.Key['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
-            if (DIRECTX.Key['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
+            if (window.Key['D']) mainCam.Pos = XMVectorAdd(mainCam.Pos, right);
+            if (window.Key['A']) mainCam.Pos = XMVectorSubtract(mainCam.Pos, right);
             static auto Yaw = 0.0f;
-            if (DIRECTX.Key[VK_LEFT])
+            if (window.Key[VK_LEFT])
                 mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw += 0.02f, 0);
-            if (DIRECTX.Key[VK_RIGHT])
+            if (window.Key[VK_RIGHT])
                 mainCam.Rot = XMQuaternionRotationRollPitchYaw(0, Yaw -= 0.02f, 0);
         }();
 
@@ -756,9 +737,9 @@ static bool MainLoop(bool retryCreate) {
             for (int eye = 0; eye < 2; ++eye) {
                 // Increment to use next texture, just before writing
                 const auto texIndex = EyeRenderTexture[eye].AdvanceToNextTexture();
-                DIRECTX.SetAndClearRenderTarget(EyeRenderTexture[eye].TexRtv[texIndex],
+                directx.SetAndClearRenderTarget(EyeRenderTexture[eye].TexRtv[texIndex],
                                                 &EyeDepthBuffer[eye]);
-                DIRECTX.SetViewport(eyeRenderViewport[eye]);
+                directx.SetViewport(eyeRenderViewport[eye]);
 
                 // Get the pose information in XM format
                 const auto eyeQuat = XMLoadFloat4(&XMFLOAT4{&EyeRenderPose[eye].Orientation.x});
@@ -795,10 +776,10 @@ static bool MainLoop(bool retryCreate) {
         isVisible = result == ovrSuccess;
 
         // Render mirror
-        DIRECTX.Context->CopyResource(
-            DIRECTX.BackBuffer,
+        directx.Context->CopyResource(
+            directx.BackBuffer,
             reinterpret_cast<ovrD3D11Texture*>(mirrorTexture.get())->D3D11.pTexture);
-        DIRECTX.SwapChain->Present(0, 0);
+        directx.SwapChain->Present(0, 0);
     }
 
     // Retry on ovrError_DisplayLost
@@ -811,9 +792,12 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE, LPSTR, int) {
     auto result = ovr_Initialize(nullptr);
     VALIDATE(OVR_SUCCESS(result), "Failed to initialize libOVR.");
 
-    VALIDATE(DIRECTX.InitWindow(hinst, L"Oculus Room Tiny (DX11)"), "Failed to open window.");
+    WindowClass window;
+    VALIDATE(window.InitWindow(hinst, L"Oculus Room Tiny (DX11)"), "Failed to open window.");
 
-    DIRECTX.Run(MainLoop);
+    window.Run(MainLoop);
 
     ovr_Shutdown();
+
+    return 0;
 }
