@@ -1,5 +1,8 @@
+// Modified (cut down / simplified) version of OculusRoomTiny sample from Oculus 0.7 SDK
+// Modified by: Matt Newport (matt@mattnewport.com)
+// Original copyright / license info below:
+
 /************************************************************************************
-Filename    :   Win32_RoomTiny_Main.cpp
 Content     :   First-person view test application for Oculus Rift
 Created     :   11th May 2015
 Authors     :   Tom Heath
@@ -17,11 +20,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 *************************************************************************************/
-/// This is an entry-level sample, showing a minimal VR sample,
-/// in a simple environment.  Use WASD keys to move around, and cursor keys.
-/// Dismiss the health and safety warning by tapping the headset,
-/// or pressing any key.
-/// It runs with DirectX11.
+/// This is an entry-level sample, showing a minimal VR sample, in a simple environment. Use WASD
+/// keys to move around, and cursor keys. Dismiss the health and safety warning by tapping the
+/// headset, or pressing any key. It runs with DirectX11.
 
 #include <algorithm>
 #include <array>
