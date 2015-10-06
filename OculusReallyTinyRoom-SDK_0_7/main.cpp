@@ -125,12 +125,18 @@ struct Window {
         return Running;
     }
 
-    void Run(bool (*MainLoop)(const Window& window, bool retryCreate)) const {
-        // false => just fail on any error
-        VALIDATE(MainLoop(*this, false), "Oculus Rift not detected.");
+    void Run(ovrResult (*MainLoop)(const Window& window)) const {
+        auto tryReinit = false;
         while (HandleMessages()) {
-            // true => we'll attempt to retry for ovrError_DisplayLost
-            if (!MainLoop(*this, true)) break;
+            auto res = MainLoop(*this);
+            // Try and reinit if display lost, otherwise this is a hard error
+            tryReinit = res == ovrError_DisplayLost ? true : tryReinit;
+            if (!tryReinit) {
+                ovrErrorInfo errorInfo{};
+                ovr_GetLastErrorInfo(&errorInfo);
+                VALIDATE(OVR_SUCCESS(res), errorInfo.ErrorString);
+                break;
+            }
             // Sleep a bit before retrying to reduce CPU load while the HMD is disconnected
             Sleep(10);
         }
@@ -434,21 +440,21 @@ struct OculusTexture {
     ID3D11RenderTargetViewPtr TexRtvs[2];
 
     OculusTexture(ID3D11Device* device, ovrHmd hmd, ovrSizei size)
-        : TextureSet{[hmd, size, device, &texRtv = TexRtvs] {
-                         // Create and validate the swap texture set and stash it in unique_ptr
-                         ovrSwapTextureSet* ts{};
-                         auto result = ovr_CreateSwapTextureSetD3D11(
-                             hmd, device,
-                             std::begin({CD3D11_TEXTURE2D_DESC(
-                                 DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
-                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)}),
-                             ovrSwapTextureSetD3D11_Typeless, &ts);
-                         VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
-                         VALIDATE(ts->TextureCount == std::size(texRtv), "TextureCount mismatch.");
-                         return ts;
-                     }(),
-                     // unique_ptr Deleter lambda to clean up the swap texture set
-                     [hmd](ovrSwapTextureSet* ts) { ovr_DestroySwapTextureSet(hmd, ts); }} {
+        : TextureSet{
+              [hmd, size, device, &texRtv = TexRtvs] {
+                  // Create and validate the swap texture set and stash it in unique_ptr
+                  ovrSwapTextureSet* ts{};
+                  auto result = ovr_CreateSwapTextureSetD3D11(
+                      hmd, device, std::begin({CD3D11_TEXTURE2D_DESC(
+                                       DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
+                                       D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)}),
+                      ovrSwapTextureSetD3D11_Typeless, &ts);
+                  VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
+                  VALIDATE(size_t(ts->TextureCount) == std::size(texRtv), "TextureCount mismatch.");
+                  return ts;
+              }(),
+              // unique_ptr Deleter lambda to clean up the swap texture set
+              [hmd](ovrSwapTextureSet* ts) { ovr_DestroySwapTextureSet(hmd, ts); }} {
         // Create render target views for each of the textures in the swap texture set
         std::transform(TextureSet->Textures, TextureSet->Textures + TextureSet->TextureCount,
                        TexRtvs, [device](auto tex) {
@@ -595,14 +601,12 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
 }
 
 // Helper to wrap ovr types like ovrHmd and ovrTexture* in a unique_ptr with custom create / destroy
-template <typename CreateFunc, typename DestroyFunc>
-auto create_unique(CreateFunc createFunc, DestroyFunc destroyFunc) {
-    return std::unique_ptr<std::remove_pointer_t<std::result_of_t<CreateFunc()>>, DestroyFunc>{
+auto create_unique = [](auto createFunc, auto destroyFunc) {
+    return std::unique_ptr<std::remove_reference_t<decltype(*createFunc())>, decltype(destroyFunc)>{
         createFunc(), destroyFunc};
-}
+};
 
-// return true to retry later (e.g. after display lost)
-static bool MainLoop(const Window& window, bool retryCreate) {
+ovrResult MainLoop(const Window& window) {
     auto result = ovrResult{};
     auto luid = ovrGraphicsLuid{};
     // Initialize the HMD, stash it in a unique_ptr for automatic cleanup.
@@ -613,23 +617,22 @@ static bool MainLoop(const Window& window, bool retryCreate) {
             return HMD;
         },
         ovr_Destroy);
-    if (OVR_FAILURE(result)) return retryCreate;
+    if (OVR_FAILURE(result)) return result;
 
     auto hmdDesc = ovr_GetHmdDesc(HMD.get());
 
-    // Setup Device and Graphics
+    // Setup Device and shared D3D objects (shaders, state objects, etc.)
     // Note: the mirror window can be any size, for this sample we use 1/2 the HMD resolution
     auto directx = DirectX11{window.Hwnd, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
                              reinterpret_cast<LUID*>(&luid)};
 
-    // Start the sensor which informs of the Rift's pose and motion
-    VALIDATE(OVR_SUCCESS(ovr_ConfigureTracking(HMD.get(), ovrTrackingCap_Orientation |
-                                                              ovrTrackingCap_MagYawCorrection |
-                                                              ovrTrackingCap_Position,
-                                               0)),
-             "Failed to configure tracking.");
+    // Initialize the sensor which tracks the Rift's position and orientation
+    result = ovr_ConfigureTracking(
+        HMD.get(),
+        ovrTrackingCap_Orientation | ovrTrackingCap_MagYawCorrection | ovrTrackingCap_Position, 0);
+    if (OVR_FAILURE(result)) return result;
 
-    // Make the eye render buffers (caution if actual size < requested due to HW limits).
+    // Create the eye render buffers (caution if actual size < requested due to HW limits).
     const ovrSizei idealSizes[] = {
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Left, hmdDesc.DefaultEyeFov[ovrEye_Left], 1.0f),
         ovr_GetFovTextureSize(HMD.get(), ovrEye_Right, hmdDesc.DefaultEyeFov[ovrEye_Right], 1.0f)};
@@ -642,23 +645,21 @@ static bool MainLoop(const Window& window, bool retryCreate) {
 
     // Create mirror texture to see on the monitor, stash it in a unique_ptr for automatic cleanup.
     auto mirrorTexture = create_unique(
-        [hmd = HMD.get(), &directx] {
+        [&result, hmd = HMD.get(), &directx] {
             ovrTexture* mirrorTexture{};
-            VALIDATE(
-                OVR_SUCCESS(ovr_CreateMirrorTextureD3D11(
-                    hmd, directx.Device,
-                    std::begin({CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                      directx.WinSizeW, directx.WinSizeH, 1, 1)}),
-                    0, &mirrorTexture)),
-                "Failed to create mirror texture.");
+            result = ovr_CreateMirrorTextureD3D11(
+                hmd, directx.Device,
+                std::begin({CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, directx.WinSizeW,
+                                                  directx.WinSizeH, 1, 1)}),
+                0, &mirrorTexture);
             return mirrorTexture;
         },
         [hmd = HMD.get()](ovrTexture* mt) { ovr_DestroyMirrorTexture(hmd, mt); });
+    if (OVR_FAILURE(result)) return result;
 
-    // Initialize the scene
+    // Initialize the scene and camera
     auto roomScene = Scene{directx.Device, directx.Context};
     auto mainCam = Camera{XMVectorSet(0.0f, 1.6f, 5.0f, 0), XMQuaternionIdentity()};
-    auto isVisible = true;
 
     // Main loop
     while (window.HandleMessages()) {
@@ -680,7 +681,7 @@ static bool MainLoop(const Window& window, bool retryCreate) {
         }();
 
         // Animate the cube
-        [& cube = roomScene.Models[0]] {
+        [&cube = roomScene.Models[0]] {
             static auto cubeClock = 0.0f;
             cube->Pos = XMFLOAT3(9 * sin(cubeClock), 3, 9 * cos(cubeClock += 0.015f));
         }();
@@ -701,33 +702,31 @@ static bool MainLoop(const Window& window, bool retryCreate) {
         }();
 
         // Render Scene to Eye Buffers
-        if (isVisible) {
-            for (auto eye : {ovrEye_Left, ovrEye_Right}) {
-                // Increment to use next texture, just before rendering
-                const auto texIndex = eyeRenderTextures[eye].AdvanceToNextTexture();
-                directx.SetAndClearRenderTarget(eyeRenderTextures[eye].TexRtvs[texIndex],
-                                                &eyeDepthBuffers[eye]);
-                directx.SetViewport(eyeRenderViewports[eye]);
+        for (auto eye : {ovrEye_Left, ovrEye_Right}) {
+            // Increment to use next texture, just before rendering
+            const auto texIndex = eyeRenderTextures[eye].AdvanceToNextTexture();
+            directx.SetAndClearRenderTarget(eyeRenderTextures[eye].TexRtvs[texIndex],
+                                            &eyeDepthBuffers[eye]);
+            directx.SetViewport(eyeRenderViewports[eye]);
 
-                // Get the pose information in XM format
-                const auto eyeQuat =
-                    XMLoadFloat4(std::begin({XMFLOAT4{&eyeRenderPoses[eye].Orientation.x}}));
-                const auto eyePos =
-                    XMLoadFloat3(std::begin({XMFLOAT3{&eyeRenderPoses[eye].Position.x}}));
+            // Get the pose information in XM format
+            const auto eyeQuat =
+                XMLoadFloat4(std::begin({XMFLOAT4{&eyeRenderPoses[eye].Orientation.x}}));
+            const auto eyePos =
+                XMLoadFloat3(std::begin({XMFLOAT3{&eyeRenderPoses[eye].Position.x}}));
 
-                // Get view and projection matrices for the Rift camera
-                const auto CombinedPos =
-                    XMVectorAdd(mainCam.Pos, XMVector3Rotate(eyePos, mainCam.Rot));
-                const auto finalCam =
-                    Camera{CombinedPos, XMQuaternionMultiply(eyeQuat, mainCam.Rot)};
-                const auto p = ovrMatrix4f_Projection(eyeRenderDesc[eye].Fov, 0.2f, 1000.0f,
-                                                      ovrProjection_RightHanded);
-                const auto proj =
-                    XMMatrixTranspose(XMLoadFloat4x4(std::begin({XMFLOAT4X4{&p.M[0][0]}})));
+            // Get view and projection matrices for the eye camera
+            const auto CombinedPos =
+                XMVectorAdd(mainCam.Pos, XMVector3Rotate(eyePos, mainCam.Rot));
+            const auto finalCam =
+                Camera{CombinedPos, XMQuaternionMultiply(eyeQuat, mainCam.Rot)};
+            const auto p = ovrMatrix4f_Projection(eyeRenderDesc[eye].Fov, 0.2f, 1000.0f,
+                                                    ovrProjection_RightHanded);
+            const auto proj =
+                XMMatrixTranspose(XMLoadFloat4x4(std::begin({XMFLOAT4X4{&p.M[0][0]}})));
 
-                // Render the scene
-                roomScene.Render(directx, XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
-            }
+            // Render the scene
+            roomScene.Render(directx, XMMatrixMultiply(finalCam.GetViewMatrix(), proj));
         }
 
         // Initialize our single full screen Fov layer.
@@ -744,25 +743,22 @@ static bool MainLoop(const Window& window, bool retryCreate) {
         const auto layers = &ld.Header;
         result = ovr_SubmitFrame(HMD.get(), 0, nullptr, &layers, 1);
         // exit the rendering loop if submit returns an error, will retry on ovrError_DisplayLost
-        isVisible = result == ovrSuccess;
-        if (!OVR_SUCCESS(result)) break;
+        if (OVR_FAILURE(result)) return result;
 
-        // Render mirror
+        // Display mirror texture on monitor
         directx.Context->CopyResource(
             directx.BackBuffer,
             reinterpret_cast<ovrD3D11Texture*>(mirrorTexture.get())->D3D11.pTexture);
         directx.SwapChain->Present(0, 0);
     }
 
-    // Retry on ovrError_DisplayLost
-    return retryCreate || !window.Running || result == ovrError_DisplayLost;
+    return result;
 }
 
 //-------------------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hinst, HINSTANCE, LPSTR, int) {
     // Initializes LibOVR, and the Rift
-    auto result = ovr_Initialize(nullptr);
-    VALIDATE(OVR_SUCCESS(result), "Failed to initialize libOVR.");
+    VALIDATE(OVR_SUCCESS(ovr_Initialize(nullptr)), "Failed to initialize libOVR.");
 
     Window window{hinst, L"Oculus Room Tiny (DX11)"};
     window.Run(MainLoop);
