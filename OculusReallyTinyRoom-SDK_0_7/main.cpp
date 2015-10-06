@@ -141,11 +141,11 @@ struct DepthBuffer {
     ID3D11DepthStencilViewPtr TexDsv;
 
     DepthBuffer(ID3D11Device* Device, ovrSizei size) {
-        CD3D11_TEXTURE2D_DESC dsDesc(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h);
-        dsDesc.MipLevels = 1;
-        dsDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         ID3D11Texture2DPtr Tex;
-        Device->CreateTexture2D(&dsDesc, NULL, &Tex);
+        Device->CreateTexture2D(
+            std::begin({CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_D24_UNORM_S8_UINT, size.w, size.h, 1, 1,
+                                              D3D11_BIND_DEPTH_STENCIL)}),
+            NULL, &Tex);
         Device->CreateDepthStencilView(Tex, NULL, &TexDsv);
     }
 };
@@ -174,29 +174,29 @@ struct DirectX11 {
     }
 
     void SetViewport(const ovrRecti& vp) const {
-        D3D11_VIEWPORT D3Dvp{
-            float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w), float(vp.Size.h), 0.0f, 1.0f};
-        Context->RSSetViewports(1, &D3Dvp);
+        Context->RSSetViewports(
+            1, std::begin({D3D11_VIEWPORT{float(vp.Pos.x), float(vp.Pos.y), float(vp.Size.w),
+                                          float(vp.Size.h), 0.0f, 1.0f}}));
     }
 };
 
 enum class TextureFill { AUTO_WHITE, AUTO_WALL, AUTO_FLOOR, AUTO_CEILING };
 
 auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFill texFill) {
-    auto dsDesc = CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM, 256, 256, 1, 8,
-                                        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
-    dsDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    auto texDesc = CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM, 256, 256, 1, 8,
+                                         D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    texDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 
     ID3D11Texture2DPtr tex;
-    device->CreateTexture2D(&dsDesc, nullptr, &tex);
+    device->CreateTexture2D(&texDesc, nullptr, &tex);
     ID3D11ShaderResourceViewPtr texSrv;
     device->CreateShaderResourceView(tex, nullptr, &texSrv);
 
     // Fill texture with requested pattern
-    std::vector<DWORD> pix(dsDesc.Width * dsDesc.Height);
-    for (auto y = 0u; y < dsDesc.Height; ++y)
-        for (auto x = 0u; x < dsDesc.Width; ++x) {
-            auto& curr = pix[y * dsDesc.Width + x];
+    std::vector<DWORD> pix(texDesc.Width * texDesc.Height);
+    for (auto y = 0u; y < texDesc.Height; ++y)
+        for (auto x = 0u; x < texDesc.Width; ++x) {
+            auto& curr = pix[y * texDesc.Width + x];
             switch (texFill) {
                 case (TextureFill::AUTO_WALL):
                     curr =
@@ -219,7 +219,7 @@ auto createTexture(ID3D11Device* device, ID3D11DeviceContext* context, TextureFi
                     break;
             }
         }
-    context->UpdateSubresource(tex, 0, nullptr, pix.data(), dsDesc.Width * 4, 0);
+    context->UpdateSubresource(tex, 0, nullptr, pix.data(), texDesc.Width * 4, 0);
     context->GenerateMips(texSrv);
 
     return texSrv;
@@ -436,13 +436,13 @@ struct OculusTexture {
     OculusTexture(ID3D11Device* device, ovrHmd hmd, ovrSizei size)
         : TextureSet{[hmd, size, device, &texRtv = TexRtvs] {
                          // Create and validate the swap texture set and stash it in unique_ptr
-                         CD3D11_TEXTURE2D_DESC dsDesc(
-                             DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
-                             D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
-
                          ovrSwapTextureSet* ts{};
                          auto result = ovr_CreateSwapTextureSetD3D11(
-                             hmd, device, &dsDesc, ovrSwapTextureSetD3D11_Typeless, &ts);
+                             hmd, device,
+                             std::begin({CD3D11_TEXTURE2D_DESC(
+                                 DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, size.w, size.h, 1, 1,
+                                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)}),
+                             ovrSwapTextureSetD3D11_Typeless, &ts);
                          VALIDATE(OVR_SUCCESS(result), "Failed to create SwapTextureSet.");
                          VALIDATE(ts->TextureCount == std::size(texRtv), "TextureCount mismatch.");
                          return ts;
@@ -452,11 +452,12 @@ struct OculusTexture {
         // Create render target views for each of the textures in the swap texture set
         std::transform(TextureSet->Textures, TextureSet->Textures + TextureSet->TextureCount,
                        TexRtvs, [device](auto tex) {
-                           CD3D11_RENDER_TARGET_VIEW_DESC rtvd(D3D11_RTV_DIMENSION_TEXTURE2D,
-                                                               DXGI_FORMAT_R8G8B8A8_UNORM);
                            ID3D11RenderTargetViewPtr rtv;
                            device->CreateRenderTargetView(
-                               reinterpret_cast<ovrD3D11Texture&>(tex).D3D11.pTexture, &rtvd, &rtv);
+                               reinterpret_cast<ovrD3D11Texture&>(tex).D3D11.pTexture,
+                               std::begin({CD3D11_RENDER_TARGET_VIEW_DESC{
+                                   D3D11_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM}}),
+                               &rtv);
                            return rtv;
                        });
     }
@@ -470,24 +471,23 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
     : WinSizeW{vpW}, WinSizeH{vpH} {
     auto windowSize = RECT{0, 0, WinSizeW, WinSizeH};
     AdjustWindowRect(&windowSize, WS_OVERLAPPEDWINDOW, false);
-    const auto flags = SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW;
-    VALIDATE(SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
-                          windowSize.bottom - windowSize.top, flags),
-             "SetWindowPos() failed.");
+    SetWindowPos(window, nullptr, 0, 0, windowSize.right - windowSize.left,
+                 windowSize.bottom - windowSize.top, SWP_NOMOVE | SWP_NOZORDER | SWP_SHOWWINDOW);
 
     IDXGIFactoryPtr dxgiFactory;
-    auto hr = CreateDXGIFactory1(dxgiFactory.GetIID(), reinterpret_cast<void**>(&dxgiFactory));
-    VALIDATE((hr == ERROR_SUCCESS), "CreateDXGIFactory1 failed");
+    VALIDATE(
+        SUCCEEDED(CreateDXGIFactory1(dxgiFactory.GetIID(), reinterpret_cast<void**>(&dxgiFactory))),
+        "CreateDXGIFactory1 failed");
 
     IDXGIAdapterPtr adapter;
     for (int iAdapter = 0; dxgiFactory->EnumAdapters(iAdapter, &adapter) != DXGI_ERROR_NOT_FOUND;
          ++iAdapter) {
         DXGI_ADAPTER_DESC adapterDesc{};
         adapter->GetDesc(&adapterDesc);
-        if ((pLuid == nullptr) || memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0) break;
+        if (!pLuid|| memcmp(&adapterDesc.AdapterLuid, pLuid, sizeof(LUID)) == 0) break;
     }
 
-    auto DriverType = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+    const auto DriverType = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
     const auto createFlags = [] {
 #ifdef _DEBUG
         return D3D11_CREATE_DEVICE_DEBUG;
@@ -495,45 +495,42 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
         return D3D11_CREATE_DEVICE_FLAG(0);
 #endif
     }();
-    auto scDesc = DXGI_SWAP_CHAIN_DESC{};
-    scDesc.BufferCount = 2;
-    scDesc.BufferDesc.Width = WinSizeW;
-    scDesc.BufferDesc.Height = WinSizeH;
-    scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    scDesc.BufferDesc.RefreshRate.Denominator = 1;
-    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scDesc.OutputWindow = window;
-    scDesc.SampleDesc.Count = 1;
-    scDesc.Windowed = TRUE;
-    scDesc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
-    hr = D3D11CreateDeviceAndSwapChain(adapter, DriverType, nullptr, createFlags, nullptr, 0,
-                                       D3D11_SDK_VERSION, &scDesc, &SwapChain, &Device, nullptr,
-                                       &Context);
-    VALIDATE((hr == ERROR_SUCCESS), "D3D11CreateDevice failed");
+    VALIDATE(SUCCEEDED(D3D11CreateDeviceAndSwapChain(
+                 adapter, DriverType, nullptr, createFlags, nullptr, 0, D3D11_SDK_VERSION,
+                 std::begin({DXGI_SWAP_CHAIN_DESC{
+                     {UINT(WinSizeW), UINT(WinSizeH), {}, DXGI_FORMAT_R8G8B8A8_UNORM},  // Buffer
+                     {1},  // SampleDesc
+                     DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                     2,  // BufferCount
+                     window,
+                     TRUE,
+                     DXGI_SWAP_EFFECT_SEQUENTIAL}}),
+                 &SwapChain, &Device, nullptr, &Context)),
+             "D3D11CreateDeviceAndSwapChain failed");
 
     // Create backbuffer
-    hr = SwapChain->GetBuffer(0, BackBuffer.GetIID(), reinterpret_cast<void**>(&BackBuffer));
-    VALIDATE((hr == ERROR_SUCCESS), "IDXGISwapChain::GetBuffer() failed");
+    VALIDATE(SUCCEEDED(SwapChain->GetBuffer(0, BackBuffer.GetIID(),
+                                            reinterpret_cast<void**>(&BackBuffer))),
+             "IDXGISwapChain::GetBuffer() failed");
 
     // Buffer for shader constants
-    CD3D11_BUFFER_DESC uniformBufferDesc(sizeof(XMMATRIX), D3D11_BIND_CONSTANT_BUFFER,
-                                         D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-    Device->CreateBuffer(&uniformBufferDesc, nullptr, &ConstantBuffer);
+    Device->CreateBuffer(
+        std::begin({CD3D11_BUFFER_DESC(sizeof(XMMATRIX), D3D11_BIND_CONSTANT_BUFFER,
+                                       D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE)}),
+        nullptr, &ConstantBuffer);
     auto buffs = {ConstantBuffer.GetInterfacePtr()};
     Context->VSSetConstantBuffers(0, UINT(size(buffs)), begin(buffs));
 
     // Set max frame latency to 1
     IDXGIDevice1Ptr DXGIDevice1;
-    hr = Device.QueryInterface(DXGIDevice1.GetIID(), &DXGIDevice1);
-    VALIDATE((hr == ERROR_SUCCESS), "QueryInterface failed");
+    VALIDATE(SUCCEEDED(Device.QueryInterface(DXGIDevice1.GetIID(), &DXGIDevice1)),
+             "QueryInterface failed");
     DXGIDevice1->SetMaximumFrameLatency(1);
 
     // Set up render states
     // Create and set rasterizer state
-    auto rs = CD3D11_RASTERIZER_DESC{D3D11_DEFAULT};
-    rs.AntialiasedLineEnable = rs.DepthClipEnable = TRUE;
     ID3D11RasterizerStatePtr rss;
-    Device->CreateRasterizerState(&rs, &rss);
+    Device->CreateRasterizerState(std::begin({CD3D11_RASTERIZER_DESC{D3D11_DEFAULT}}), &rss);
     Context->RSSetState(rss);
 
     // Create and set depth stencil state
@@ -565,7 +562,7 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
                                              oTex = tex;
                                              oCol = col;
                                          })";
-    ID3DBlobPtr vsBlob = compileShader(defaultVertexShaderSrc, "vs_4_0");
+    auto vsBlob = compileShader(defaultVertexShaderSrc, "vs_4_0");
     Device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr,
                                &D3DVert);
     D3D11_INPUT_ELEMENT_DESC defaultVertexDesc[] = {
@@ -590,11 +587,10 @@ DirectX11::DirectX11(HWND window, int vpW, int vpH, const LUID* pLuid)
                               &D3DPix);
 
     // Create sampler state
-    CD3D11_SAMPLER_DESC ss{D3D11_DEFAULT};
+    auto ss = CD3D11_SAMPLER_DESC{D3D11_DEFAULT};
     ss.Filter = D3D11_FILTER_ANISOTROPIC;
     ss.AddressU = ss.AddressV = ss.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     ss.MaxAnisotropy = 8;
-    ss.MaxLOD = 15;
     Device->CreateSamplerState(&ss, &SamplerState);
 }
 
@@ -617,20 +613,21 @@ static bool MainLoop(const Window& window, bool retryCreate) {
             return HMD;
         },
         ovr_Destroy);
-    if (!OVR_SUCCESS(result)) return retryCreate;
+    if (OVR_FAILURE(result)) return retryCreate;
 
     auto hmdDesc = ovr_GetHmdDesc(HMD.get());
 
     // Setup Device and Graphics
     // Note: the mirror window can be any size, for this sample we use 1/2 the HMD resolution
-    DirectX11 directx(window.Hwnd, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
-        reinterpret_cast<LUID*>(&luid));
+    auto directx = DirectX11{window.Hwnd, hmdDesc.Resolution.w / 2, hmdDesc.Resolution.h / 2,
+                             reinterpret_cast<LUID*>(&luid)};
 
     // Start the sensor which informs of the Rift's pose and motion
-    result = ovr_ConfigureTracking(
-        HMD.get(),
-        ovrTrackingCap_Orientation | ovrTrackingCap_MagYawCorrection | ovrTrackingCap_Position, 0);
-    VALIDATE(OVR_SUCCESS(result), "Failed to configure tracking.");
+    VALIDATE(OVR_SUCCESS(ovr_ConfigureTracking(HMD.get(), ovrTrackingCap_Orientation |
+                                                              ovrTrackingCap_MagYawCorrection |
+                                                              ovrTrackingCap_Position,
+                                               0)),
+             "Failed to configure tracking.");
 
     // Make the eye render buffers (caution if actual size < requested due to HW limits).
     const ovrSizei idealSizes[] = {
@@ -643,17 +640,20 @@ static bool MainLoop(const Window& window, bool retryCreate) {
     const ovrRecti eyeRenderViewports[] = {{{0, 0}, idealSizes[ovrEye_Left]},
                                            {{0, 0}, idealSizes[ovrEye_Right]}};
 
-    // Create a mirror to see on the monitor, stash it in a unique_ptr for automatic cleanup.
-    auto mirrorTexture =
-        create_unique([&result, hmd = HMD.get(), &directx] {
-            CD3D11_TEXTURE2D_DESC td(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, directx.WinSizeW,
-                                     directx.WinSizeH, 1, 1);
+    // Create mirror texture to see on the monitor, stash it in a unique_ptr for automatic cleanup.
+    auto mirrorTexture = create_unique(
+        [hmd = HMD.get(), &directx] {
             ovrTexture* mirrorTexture{};
-            result = ovr_CreateMirrorTextureD3D11(hmd, directx.Device, &td, 0, &mirrorTexture);
+            VALIDATE(
+                OVR_SUCCESS(ovr_CreateMirrorTextureD3D11(
+                    hmd, directx.Device,
+                    std::begin({CD3D11_TEXTURE2D_DESC(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                                      directx.WinSizeW, directx.WinSizeH, 1, 1)}),
+                    0, &mirrorTexture)),
+                "Failed to create mirror texture.");
             return mirrorTexture;
         },
-                      [hmd = HMD.get()](ovrTexture * mt) { ovr_DestroyMirrorTexture(hmd, mt); });
-    VALIDATE(OVR_SUCCESS(result), "Failed to create mirror texture.");
+        [hmd = HMD.get()](ovrTexture* mt) { ovr_DestroyMirrorTexture(hmd, mt); });
 
     // Initialize the scene
     auto roomScene = Scene{directx.Device, directx.Context};
@@ -744,8 +744,8 @@ static bool MainLoop(const Window& window, bool retryCreate) {
         const auto layers = &ld.Header;
         result = ovr_SubmitFrame(HMD.get(), 0, nullptr, &layers, 1);
         // exit the rendering loop if submit returns an error, will retry on ovrError_DisplayLost
-        if (!OVR_SUCCESS(result)) return retryCreate;
         isVisible = result == ovrSuccess;
+        if (!OVR_SUCCESS(result)) break;
 
         // Render mirror
         directx.Context->CopyResource(
